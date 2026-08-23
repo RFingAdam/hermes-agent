@@ -62,7 +62,7 @@ function load(turnScript) {
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, disbandGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, disbandGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES, applyGroupChatSettings, getGroupChatCeilings };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -159,7 +159,52 @@ test('hard caps: chatty members stop at GROUP_CHAT_MAX_MESSAGES total', async ()
   }
 
   const memberMessages = roomLog(gc, 'Loud').filter(e => e.from.kind === 'member')
-  assert.ok(memberMessages.length <= gc.GROUP_CHAT_MAX_MESSAGES, `posted ${memberMessages.length}`)
+  assert.ok(memberMessages.length <= gc.getGroupChatCeilings().maxMessages, `posted ${memberMessages.length}`)
+})
+
+test('fork change: default ceilings are raised well past the original 3-round/10-message caps', () => {
+  const gc = load(() => '(pass)')
+  const ceilings = gc.getGroupChatCeilings()
+  assert.ok(ceilings.maxRounds > 3, `expected raised maxRounds, got ${ceilings.maxRounds}`)
+  assert.ok(ceilings.maxMessages > 10, `expected raised maxMessages, got ${ceilings.maxMessages}`)
+})
+
+test('fork change: applyGroupChatSettings accepts a valid override and clamps out-of-range/malformed input', () => {
+  const gc = load(() => '(pass)')
+  const beforeJson = JSON.stringify(gc.getGroupChatCeilings())
+
+  gc.applyGroupChatSettings({ maxRounds: 50, maxMessages: 300 })
+  assert.equal(gc.getGroupChatCeilings().maxRounds, 50)
+  assert.equal(gc.getGroupChatCeilings().maxMessages, 300)
+
+  // Out-of-range values are ignored — previous (valid) values survive.
+  gc.applyGroupChatSettings({ maxRounds: 0, maxMessages: 99999 })
+  assert.equal(gc.getGroupChatCeilings().maxRounds, 50)
+  assert.equal(gc.getGroupChatCeilings().maxMessages, 300)
+
+  // Malformed shapes never throw and never touch the ceilings.
+  gc.applyGroupChatSettings(null)
+  gc.applyGroupChatSettings('nonsense')
+  gc.applyGroupChatSettings({ maxRounds: 'lots' })
+  assert.equal(gc.getGroupChatCeilings().maxRounds, 50)
+  assert.equal(gc.getGroupChatCeilings().maxMessages, 300)
+
+  // Sanity: settings actually change real loop behavior, not just the getter.
+  gc.applyGroupChatSettings({ maxRounds: 1, maxMessages: 1 })
+  assert.notEqual(JSON.stringify(gc.getGroupChatCeilings()), beforeJson)
+})
+
+test('fork change: a tuned-down maxMessages cap is actually enforced by the loop', async () => {
+  const gc = load((profile, prompt, n) => `message ${n} — @everyone keep going`)
+  gc.applyGroupChatSettings({ maxRounds: 24, maxMessages: 2 })
+
+  gc.sendToGroupChat('Capped', MEMBERS, 'go wild but capped')
+  for (let i = 0; i < 400 && (gc.$groupChats.get().Capped || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  const memberMessages = roomLog(gc, 'Capped').filter(e => e.from.kind === 'member')
+  assert.ok(memberMessages.length <= 2, `posted ${memberMessages.length}, expected <= 2`)
 })
 
 test('failed member turn is a pass, not a room error', async () => {

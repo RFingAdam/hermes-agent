@@ -3206,10 +3206,50 @@ function knownGroups(metaByName) {
 // turn in its OWN persistent per-group Hermes session and is fed only the
 // room messages that are NEW since it last saw the room.
 
-const GROUP_CHAT_MAX_ROUNDS = 3
-const GROUP_CHAT_MAX_MESSAGES = 10
+// Local fork change (2026-08-23, RFingAdam/hermes-agent): upstream's 3-round /
+// 10-message ceiling is tuned for a quick multi-bot exchange, not a job that
+// needs a room to keep working turn-over-turn until it's actually done — our
+// use case wants rooms that run substantially longer per user send. Raise the
+// shipped defaults, and make both live-tunable via
+// ctx.storage('group-chat-settings') = { maxRounds, maxMessages } so a future
+// cost/behavior adjustment doesn't need a rebuild. The REAL safety valve
+// against a runaway/looping room stays the existing "everyone passed this
+// round" settle exit a few lines down, not a low round count — a genuinely
+// stuck room still stops within one round of nobody having anything left to
+// say, regardless of how high these ceilings go.
+let GROUP_CHAT_MAX_ROUNDS = 24
+let GROUP_CHAT_MAX_MESSAGES = 120
 const GROUP_CHAT_HISTORY_LIMIT = 24
 const GROUP_CHAT_MAX_MEMBERS = 6
+
+/** Apply a persisted {maxRounds, maxMessages} override, clamped to sane
+ *  bounds. Silently ignores malformed/out-of-range input so a bad stored
+ *  value can never brick the room loop (falls back to the module defaults
+ *  above). */
+function applyGroupChatSettings(value) {
+  if (!value || typeof value !== 'object') {
+    return
+  }
+
+  const rounds = Number(value.maxRounds)
+  const messages = Number(value.maxMessages)
+
+  if (Number.isFinite(rounds) && rounds >= 1 && rounds <= 500) {
+    GROUP_CHAT_MAX_ROUNDS = Math.floor(rounds)
+  }
+
+  if (Number.isFinite(messages) && messages >= 1 && messages <= 2000) {
+    GROUP_CHAT_MAX_MESSAGES = Math.floor(messages)
+  }
+}
+
+/** Current effective ceilings — a live read, since the values above are
+ *  mutable `let`s a settings override can change after module load. Exists
+ *  mainly so tests (and any future settings UI) can observe the real
+ *  in-effect numbers rather than a stale closed-over copy. */
+function getGroupChatCeilings() {
+  return { maxRounds: GROUP_CHAT_MAX_ROUNDS, maxMessages: GROUP_CHAT_MAX_MESSAGES }
+}
 
 /** "(pass)" (loosely: pass / (pass) / pass.) or empty = the member stayed silent. */
 function isGroupPassText(text) {
@@ -8283,6 +8323,17 @@ export default {
         .catch(() => undefined)
     } catch {
       /* no storage — default (silent) stays */
+    }
+
+    // Hydrate a live-tunable group-chat round/message ceiling override, if
+    // one was ever saved (fork addition — see applyGroupChatSettings above).
+    // Absent/malformed storage silently keeps the raised module defaults.
+    try {
+      Promise.resolve(ctx.storage?.get?.('group-chat-settings'))
+        .then(value => applyGroupChatSettings(value))
+        .catch(() => undefined)
+    } catch {
+      /* no storage — module defaults stay */
     }
 
     // Hydrate persisted group-chat room logs (epoch/running are runtime-only
