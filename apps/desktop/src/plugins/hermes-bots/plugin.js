@@ -6438,6 +6438,33 @@ function knownGroups(metaByName) {
 // independent of whether the pass-detection heuristic ever fires.
 const GROUP_CHAT_STOCK_MAX_ROUNDS = 3
 const GROUP_CHAT_STOCK_MAX_MESSAGES = 10
+// Per-room mode presets (override the global stock/extended toggle when set).
+// Message caps are expressed as messages-per-member-per-round so a 5-bot room
+// does not burn a flat message budget before the round cap (the PR #1 bug).
+const GROUP_CHAT_MODE_PRESETS = {
+  build: {
+    maxRounds: 24,
+    messagesPerMemberPerRound: 3,
+    wallClockMs: 60 * 60 * 1000, // 60 min
+    toolCapable: true,
+    autoSummaryOnCap: false
+  },
+  decide: {
+    maxRounds: 4,
+    messagesPerMemberPerRound: 2,
+    wallClockMs: 15 * 60 * 1000, // 15 min
+    toolCapable: false,
+    autoSummaryOnCap: true
+  },
+  standing: {
+    maxRounds: 8,
+    messagesPerMemberPerRound: 2,
+    wallClockMs: 30 * 60 * 1000, // 30 min
+    toolCapable: false,
+    autoSummaryOnCap: false
+  }
+}
+const GROUP_CHAT_ROOM_MODES = Object.freeze(['build', 'decide', 'standing'])
 const GROUP_CHAT_EXTENDED_MAX_ROUNDS = 24
 const GROUP_CHAT_EXTENDED_MAX_MESSAGES = 120
 const GROUP_CHAT_EXTENDED_WALL_CLOCK_MS = 30 * 60 * 1000 // 30 min, extended mode only
@@ -6467,6 +6494,30 @@ function setGroupChatExtendedMode(enabled) {
   } catch {
     /* storage unavailable — pref holds for this window only */
   }
+}
+
+/** Normalize a room mode value. Unknown/empty → null (unset = global toggle). */
+function normalizeGroupChatRoomMode(mode) {
+  if (typeof mode !== 'string') {
+    return null
+  }
+
+  const key = mode.trim().toLowerCase()
+  return GROUP_CHAT_ROOM_MODES.includes(key) ? key : null
+}
+
+/** Set a room's mode and persist it on the room record. null/invalid clears. */
+function setGroupChatRoomMode(group, mode) {
+  const nextMode = normalizeGroupChatRoomMode(mode)
+  updateGroupChat(group, room => {
+    if (nextMode) {
+      room.mode = nextMode
+    } else {
+      delete room.mode
+    }
+    return room
+  })
+  return nextMode
 }
 
 /** Validate + store an extended-mode override, field-by-field, each clamped
@@ -6507,20 +6558,70 @@ function applyGroupChatExtendedOverride(value) {
   $groupChatExtendedOverride = next
 }
 
-/** Effective ceilings for the CURRENT mode — a live read, since extended
- *  mode / its override can change between room-turn drives. `wallClockMs`
- *  is null under stock mode (matches upstream: no wall-clock cap existed
- *  before this fork). Exists so tests (and any future settings UI) observe
- *  the real in-effect numbers rather than a closed-over snapshot. */
-function getGroupChatCeilings() {
+/** Effective ceilings for a given mode + live member count.
+ *  Message budget = messagesPerMemberPerRound * members * rounds so a 5-bot
+ *  room can actually finish its stated round count (PR #1 verification bug).
+ *  Bad/unknown mode falls through to null so the caller uses the global toggle. */
+function getModeCeilings(mode, memberCount) {
+  const preset = GROUP_CHAT_MODE_PRESETS[mode]
+  if (!preset) {
+    return null
+  }
+
+  const members = Math.max(1, Math.min(GROUP_CHAT_MAX_MEMBERS, Math.floor(Number(memberCount) || 1)))
+  const maxRounds = preset.maxRounds
+  const maxMessages = Math.max(
+    members,
+    Math.floor(preset.messagesPerMemberPerRound * members * maxRounds)
+  )
+
+  return {
+    maxRounds,
+    maxMessages,
+    wallClockMs: preset.wallClockMs,
+    autoSummary: Boolean(preset.autoSummaryOnCap),
+    toolCapable: Boolean(preset.toolCapable),
+    mode
+  }
+}
+
+/** Effective ceilings for a room drive. Per-room mode OVERRIDES the global
+ *  stock/extended toggle; unset mode keeps exact prior behavior (stock or
+ *  extended + override). `members` is the live roster at drive time so the
+ *  message budget scales with room size. */
+function getGroupChatCeilings(group, members = []) {
+  const room = typeof group === 'string' ? ($groupChats.get()[group] || {}) : {}
+  const mode = normalizeGroupChatRoomMode(room.mode)
+  const memberCount = Array.isArray(members) && members.length
+    ? members.length
+    : (Array.isArray(room.members) && room.members.length ? room.members.length : 1)
+
+  if (mode) {
+    const modeCeilings = getModeCeilings(mode, memberCount)
+    if (modeCeilings) {
+      return modeCeilings
+    }
+  }
+
+  // Unset mode: exact prior global-toggle behavior (zero regression).
   if (!$groupChatExtendedMode.get()) {
-    return { maxRounds: GROUP_CHAT_STOCK_MAX_ROUNDS, maxMessages: GROUP_CHAT_STOCK_MAX_MESSAGES, wallClockMs: null }
+    return {
+      maxRounds: GROUP_CHAT_STOCK_MAX_ROUNDS,
+      maxMessages: GROUP_CHAT_STOCK_MAX_MESSAGES,
+      wallClockMs: null,
+      autoSummary: false,
+      toolCapable: true,
+      mode: null
+    }
   }
 
   return {
     maxRounds: $groupChatExtendedOverride.maxRounds ?? GROUP_CHAT_EXTENDED_MAX_ROUNDS,
     maxMessages: $groupChatExtendedOverride.maxMessages ?? GROUP_CHAT_EXTENDED_MAX_MESSAGES,
-    wallClockMs: $groupChatExtendedOverride.wallClockMs ?? GROUP_CHAT_EXTENDED_WALL_CLOCK_MS
+    wallClockMs: $groupChatExtendedOverride.wallClockMs ?? GROUP_CHAT_EXTENDED_WALL_CLOCK_MS,
+    autoSummary: false,
+    toolCapable: true,
+    mode: null
   }
 }
 
@@ -6701,6 +6802,10 @@ function formatGroupChatLine(entry, viewerName) {
     return `${entry.from.name || 'User'} (user): ${entry.text}${attached}`
   }
 
+  if (entry.from.kind === 'system') {
+    return `[system] ${entry.text}`
+  }
+
   const suffix = entry.from.name === viewerName ? ' (you)' : ''
   // Cross-connection speakers carry their device so same-named agents on
   // two machines stay tellable apart in every member's transcript.
@@ -6712,7 +6817,7 @@ function formatGroupChatLine(entry, viewerName) {
 /** The full per-turn payload for one member: participation rules + the room
  *  delta. Rules travel in the turn payload (not SOUL) so every existing bot
  *  can join a group chat without a profile migration. */
-function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines }) {
+function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines, toolCapable = true }) {
   const viewerKey = groupMemberKey(viewer)
   const peers = members.filter(m => groupMemberKey(m) !== viewerKey)
   const peerNames = peers
@@ -6722,6 +6827,19 @@ function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines }) {
     })
     .join(', ')
 
+  const rules = [
+    '- Reply with ONE conversational message ONLY if you have something new worth adding: build on what was just said, claim or hand off work, answer a question aimed at you, or report a real result. Keep chatter short (1-3 sentences) — but when you are delivering a result, an answer the user asked for, or substantive work, give it at full quality and length; never thin out real content to fit the room.',
+    '- If you have nothing new to add, reply with exactly "(pass)". Passing is good — it lets the conversation settle.',
+    '- Mention a teammate as @name to pull them in; mention @user only for a judgment call or a result the user needs. Do not repeat points already made.',
+    '- Never reveal content from your private 1:1 chats. Your reply text goes to the room verbatim — no preamble, no meta-commentary.'
+  ]
+
+  if (toolCapable === false) {
+    rules.push(
+      '- This room is chat-only (decide/standing mode): do NOT call tools, run shell/terminal commands, edit files, open browsers, or create tickets. Discuss and decide in text only.'
+    )
+  }
+
   return [
     `[Group chat: "${groupName}"] You are @${botHandle(viewer.name, viewer)}, one participant in a group chat with ${peerNames || 'no one else yet'} and the user.`,
     '',
@@ -6729,10 +6847,7 @@ function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines }) {
     ...deltaLines.map(line => `  ${line}`),
     '',
     'Rules for this room:',
-    '- Reply with ONE conversational message ONLY if you have something new worth adding: build on what was just said, claim or hand off work, answer a question aimed at you, or report a real result. Keep chatter short (1-3 sentences) — but when you are delivering a result, an answer the user asked for, or substantive work, give it at full quality and length; never thin out real content to fit the room.',
-    '- If you have nothing new to add, reply with exactly "(pass)". Passing is good — it lets the conversation settle.',
-    '- Mention a teammate as @name to pull them in; mention @user only for a judgment call or a result the user needs. Do not repeat points already made.',
-    '- Never reveal content from your private 1:1 chats. Your reply text goes to the room verbatim — no preamble, no meta-commentary.'
+    ...rules
   ].join('\n')
 }
 
@@ -6797,7 +6912,9 @@ function updateGroupChat(group, mutate, { sync = true } = {}) {
         roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
         // Room picture (small data URL, same normalization as bot avatars).
         image: room.image || null,
-        syncRevision: Math.max(0, Number(room.syncRevision || 0))
+        syncRevision: Math.max(0, Number(room.syncRevision || 0)),
+        // Per-room mode preset (build / decide / standing); absent keeps the global toggle.
+        ...(normalizeGroupChatRoomMode(room.mode) ? { mode: normalizeGroupChatRoomMode(room.mode) } : {})
       }
     }
 
@@ -7801,22 +7918,59 @@ function heldMemberWatermarkAdvance(seen, logLength) {
 
 // --- end member-hold helpers ---
 
-/** Drive one bounded round-robin turn for ONE THREAD. Serial — one member at
- *  a time. A newer user send bumps the room epoch; this loop notices at the
- *  next member boundary, bails, and the newest send's own loop takes over.
+/** Cheap, deterministic room summary posted on decide-mode cap-hit.
+ *  No nested LLM turn — keeps the exit path free of further spend/recursion. */
+function summarizeGroupChat(group, members) {
+  const room = $groupChats.get()[group] || { log: [] }
+  const log = Array.isArray(room.log) ? room.log : []
+  if (!log.length) {
+    return
+  }
+
+  const userLines = log.filter(e => e?.from?.kind === 'user').map(e => String(e.text || '').trim()).filter(Boolean)
+  const memberLines = log.filter(e => e?.from?.kind === 'member')
+  const speakers = [...new Set(memberLines.map(e => e.from?.name).filter(Boolean))]
+  const lastUser = userLines[userLines.length - 1] || '(no user prompt)'
+  const lastMember = memberLines[memberLines.length - 1]
+  const lastSnippet = lastMember
+    ? `${lastMember.from?.name || 'member'}: ${String(lastMember.text || '').trim().slice(0, 240)}`
+    : '(no member replies yet)'
+  const roster = (Array.isArray(members) ? members : []).map(m => m?.name).filter(Boolean)
+  const body = [
+    `**Decide-mode room summary** (${group})`,
+    `- Members: ${(roster.length ? roster : speakers).join(', ') || '—'}`,
+    `- Turns posted: ${memberLines.length} member / ${userLines.length} user`,
+    `- Last user ask: ${lastUser.slice(0, 280)}`,
+    `- Last member reply: ${lastSnippet}`,
+    `- Status: drive hit a decide-mode ceiling (rounds/messages/wall-clock). No kanban card created (opt-in default OFF).`
+  ].join('\n')
+
+  appendGroupChatEntry(group, { kind: 'system', name: 'Summary' }, body)
+}
+
+/** Drive one bounded round-robin room turn. Serial — one member at a time.
+ *  A newer user send bumps the room epoch; this loop notices at the next
+ *  member boundary, bails, and the newest send's own loop takes over.
+ *  Ceilings (rounds/messages/wall-clock) are read ONCE at drive start via
+ *  getGroupChatCeilings(group, members) — per-room mode when set, else the
+ *  global stock/extended toggle (null wall-clock under stock).
  *  Watermarks are per thread+member (`${thread}::${memberKey}`), so parallel
  *  topics never eat each other's deltas. */
 async function runGroupChatRounds(group, members, thread) {
   const startEpoch = ($groupChats.get()[group] || {}).epoch || 0
   const isCurrent = () => (($groupChats.get()[group] || {}).epoch || 0) === startEpoch
-  const { maxRounds, maxMessages, wallClockMs } = getGroupChatCeilings()
+  const { maxRounds, maxMessages, wallClockMs, autoSummary, toolCapable } = getGroupChatCeilings(group, members)
   const deadline = wallClockMs ? Date.now() + wallClockMs : null
   let posted = 0
+  // 'cap' = hit a hard ceiling; 'settle' = all-pass natural end; decide-mode
+  // auto-summary only fires on cap (always useful), never on a clean settle.
+  let exitReason = 'cap'
 
   try {
     for (let round = 0; round < maxRounds; round++) {
       if (deadline && Date.now() >= deadline) {
-        return // extended-mode wall-clock cap reached
+        exitReason = 'cap'
+        return
       }
       // Deliver any replies that finished after their turn timed out —
       // every member, not just this round's responders, so long work is
@@ -7849,10 +8003,14 @@ async function runGroupChatRounds(group, members, thread) {
       let spokeThisRound = 0
 
       for (const member of responders) {
-        if (!isCurrent() || posted >= maxMessages || (deadline && Date.now() >= deadline)) {
-          if (!isCurrent()) {
-            recordGroupActivity(group, { kind: 'cancelled', member: null, thread })
-          }
+        if (!isCurrent()) {
+          exitReason = 'superseded'
+          recordGroupActivity(group, { kind: 'cancelled', member: null, thread })
+          return
+        }
+
+        if (posted >= maxMessages || (deadline && Date.now() >= deadline)) {
+          exitReason = 'cap'
           return
         }
 
@@ -7901,7 +8059,8 @@ async function runGroupChatRounds(group, members, thread) {
           groupName: group,
           members,
           viewer: member,
-          deltaLines: delta.slice(-GROUP_CHAT_HISTORY_LIMIT).map(e => formatGroupChatLine(e, member.name))
+          deltaLines: delta.slice(-GROUP_CHAT_HISTORY_LIMIT).map(e => formatGroupChatLine(e, member.name)),
+          toolCapable
         })
 
         // Images riding this delta (user attachments — member entries don't
@@ -7987,9 +8146,12 @@ async function runGroupChatRounds(group, members, thread) {
       }
 
       if (spokeThisRound === 0) {
+        exitReason = 'settle'
         return // everyone passed — the conversation settled
       }
     }
+    // Exhausted maxRounds without settling → treat as a cap hit.
+    exitReason = 'cap'
   } finally {
     if (isCurrent()) {
       recordGroupActivity(group, { kind: 'settled', member: null, thread })
@@ -8008,6 +8170,14 @@ async function runGroupChatRounds(group, members, thread) {
 
       if (strandedLeft.length && typeof window !== 'undefined') {
         void harvestStrandedUntilSettled(group, members, thread)
+      }
+
+      if (autoSummary && exitReason === 'cap') {
+        try {
+          summarizeGroupChat(group, members)
+        } catch {
+          /* summary must never brick the room cleanup path */
+        }
       }
     }
   }
@@ -12719,6 +12889,8 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
       pendingAttachments:
         typeof value === 'function' ? value(current.pendingAttachments || {}) : value
     }))
+  const roomMode = normalizeGroupChatRoomMode(room.mode)
+  const ceilings = getGroupChatCeilings(group, members)
   const [confirmDisband, setConfirmDisband] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   // Click-to-disambiguate: which log entry is showing its speaker's full
@@ -12844,6 +13016,13 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
   const availabilityLabel = `${availableMembers} of ${members.length} available`
   const memberNames = members.map(b => displayName(b, botRosterMeta(b, allMeta))).join(', ') || 'No bots in this group chat'
 
+  const modeLabel = roomMode
+    ? roomMode.charAt(0).toUpperCase() + roomMode.slice(1)
+    : 'Default'
+  const modeTip = roomMode
+    ? `${modeLabel} mode — ${ceilings.maxRounds} rounds / ~${ceilings.maxMessages} msgs / ${ceilings.wallClockMs ? Math.round(ceilings.wallClockMs / 60000) + ' min' : 'no'} wall-clock. Click to change.`
+    : 'Room mode unset — uses the global stock/extended toggle. Click to set build / decide / standing.'
+
   const header = jsxs('div', {
     className: 'flex items-center gap-2 px-2.5 pt-2.5 pb-2',
     children: [
@@ -12890,6 +13069,68 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
           onClick: () => setSettingsOpen(true),
           children: jsx(Codicon, { name: 'gear' })
         })
+      }),
+      // Per-room mode preset (build / decide / standing). Unset keeps the
+      // global stock/extended toggle. Lives on the room header so each room
+      // can diverge without touching the install-wide stopwatch.
+      jsxs(DropdownMenu, {
+        children: [
+          jsx(Tip, {
+            label: modeTip,
+            children: jsx(DropdownMenuTrigger, {
+              asChild: true,
+              children: jsxs('button', {
+                type: 'button',
+                'aria-label': `Room mode: ${modeLabel}`,
+                className: cn(
+                  'flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[0.65rem] font-medium transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+                  roomMode ? 'text-(--ui-accent,#4f9cf9)' : 'text-(--ui-text-tertiary)'
+                ),
+                children: [
+                  jsx(Codicon, { name: roomMode === 'build' ? 'tools' : roomMode === 'decide' ? 'checklist' : roomMode === 'standing' ? 'organization' : 'settings-gear' }),
+                  modeLabel
+                ]
+              })
+            })
+          }),
+          jsxs(DropdownMenuContent, {
+            align: 'end',
+            children: [
+              jsxs(DropdownMenuItem, {
+                onSelect: () => setGroupChatRoomMode(group, null),
+                children: [
+                  jsx(Codicon, { name: 'settings-gear', className: 'mr-1.5' }),
+                  'Default (global toggle)',
+                  !roomMode ? jsx('span', { className: 'ml-auto text-[0.65rem] text-(--ui-accent,#4f9cf9)', children: '✓' }) : null
+                ]
+              }),
+              jsxs(DropdownMenuItem, {
+                onSelect: () => setGroupChatRoomMode(group, 'build'),
+                children: [
+                  jsx(Codicon, { name: 'tools', className: 'mr-1.5' }),
+                  'Build — long, tool-capable',
+                  roomMode === 'build' ? jsx('span', { className: 'ml-auto text-[0.65rem] text-(--ui-accent,#4f9cf9)', children: '✓' }) : null
+                ]
+              }),
+              jsxs(DropdownMenuItem, {
+                onSelect: () => setGroupChatRoomMode(group, 'decide'),
+                children: [
+                  jsx(Codicon, { name: 'checklist', className: 'mr-1.5' }),
+                  'Decide — tight, auto-summary',
+                  roomMode === 'decide' ? jsx('span', { className: 'ml-auto text-[0.65rem] text-(--ui-accent,#4f9cf9)', children: '✓' }) : null
+                ]
+              }),
+              jsxs(DropdownMenuItem, {
+                onSelect: () => setGroupChatRoomMode(group, 'standing'),
+                children: [
+                  jsx(Codicon, { name: 'organization', className: 'mr-1.5' }),
+                  'Standing — moderate coordination',
+                  roomMode === 'standing' ? jsx('span', { className: 'ml-auto text-[0.65rem] text-(--ui-accent,#4f9cf9)', children: '✓' }) : null
+                ]
+              })
+            ]
+          })
+        ]
       }),
       jsx(Tip, {
         label: `Disband the ${group} group chat`,
@@ -13089,12 +13330,13 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
   // One log entry, rendered exactly as before conversation folding existed.
   const renderEntry = (entry, index) => {
                   const isUser = entry.from.kind === 'user'
-                  const meta = isUser || entry.from.source ? null : allMeta[entry.from.name]
+                  const isSystem = entry.from.kind === 'system'
+                  const meta = isUser || isSystem || entry.from.source ? null : allMeta[entry.from.name]
                   // Match this speaker back to its member descriptor so display
                   // names and disambiguating handles come from the roster (the
                   // primary "default" profile renders as Hermes, remote dupes
                   // carry their @name-device handle) instead of raw profile ids.
-                  const member = isUser
+                  const member = isUser || isSystem
                     ? null
                     : members.find(b =>
                         b.name === entry.from.name &&
@@ -13102,21 +13344,27 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
                           ? (b.connectionLabel || b.connectionId) === entry.from.source
                           : !b.remoteSource)
                       ) || null
-                  const display = isUser ? 'You' : displayName(member || { name: entry.from.name }, meta)
+                  const display = isUser
+                    ? 'You'
+                    : isSystem
+                      ? (entry.from.name || 'System')
+                      : displayName(member || { name: entry.from.name }, meta)
                   const entryKey = `${entry.at}:${index}`
-                  const revealed = !isUser && revealedSpeaker === entryKey
+                  const revealed = !isUser && !isSystem && revealedSpeaker === entryKey
                   // Clicked: append the gateway name so same-named agents on
                   // two connections are tellable apart on demand.
                   const label = isUser
                     ? 'You'
-                    : revealed
-                      ? `${display}${entry.from.source ? `-${entry.from.source}` : ''} (@${botHandle(entry.from.name, member || undefined)})`
-                      : display
+                    : isSystem
+                      ? display
+                      : revealed
+                        ? `${display}${entry.from.source ? `-${entry.from.source}` : ''} (@${botHandle(entry.from.name, member || undefined)})`
+                        : display
                   // Speaker avatar: same appearance pipeline as the roster
                   // (custom image/pet, else deterministic shape+color face).
                   // Remote speakers have no local meta and get the
                   // deterministic face for their name — stable per bot.
-                  const { shape, color, image } = isUser
+                  const { shape, color, image } = isUser || isSystem
                     ? { shape: null, color: null, image: null }
                     : botAppearance(entry.from.name, meta)
                   const photo = Boolean(image && !isBackfilledFacePng(image))
@@ -13124,10 +13372,14 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
                   return jsxs('div', {
                     className: cn(
                       'group flex items-start gap-2',
-                      isUser ? 'rounded-md bg-(--chrome-action-hover) px-2 py-1.5' : 'px-2 py-1'
+                      isUser
+                        ? 'rounded-md bg-(--chrome-action-hover) px-2 py-1.5'
+                        : isSystem
+                          ? 'rounded-md border border-dashed border-(--ui-stroke-secondary) px-2 py-1.5'
+                          : 'px-2 py-1'
                     ),
                     children: [
-                      isUser
+                      isUser || isSystem
                         ? null
                         : jsx('div', {
                             className: 'mt-0.5 shrink-0',
@@ -13145,9 +13397,12 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
                           jsxs('div', {
                             className: 'flex items-center gap-2',
                             children: [
-                              isUser
+                              isUser || isSystem
                                 ? jsx('span', {
-                                    className: 'text-[0.7rem] font-semibold text-foreground',
+                                    className: cn(
+                                      'text-[0.7rem] font-semibold',
+                                      isSystem ? 'text-(--ui-text-tertiary)' : 'text-foreground'
+                                    ),
                                     children: label
                                   })
                                 : jsx('button', {
@@ -15204,6 +15459,7 @@ export default {
 
             for (const [name, room] of Object.entries(value)) {
               if (room && Array.isArray(room.log)) {
+                const mode = normalizeGroupChatRoomMode(room.mode)
                 rooms[name] = {
                   // Pre-thread entries get synthetic thread ids on hydrate so
                   // every UI/engine path can assume entry.thread exists.
@@ -15220,6 +15476,7 @@ export default {
                   roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
                   image: typeof room.image === 'string' && room.image ? room.image : null,
                   syncRevision: Math.max(0, Number(room.syncRevision || 0)),
+                  ...(mode ? { mode } : {}),
                   epoch: 0,
                   running: false
                 }
