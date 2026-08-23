@@ -64,7 +64,7 @@ function load(turnScript) {
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, disbandGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, disbandGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, GROUP_CHAT_MODE_PRESETS, GROUP_CHAT_ROOM_MODES, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings, getModeCeilings, setGroupChatRoomMode, normalizeGroupChatRoomMode, summarizeGroupChat, updateGroupChat };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -523,4 +523,137 @@ test('source contract: room messages carry the speaker avatar via the roster app
   // Header shows the member faces (capped) with a names tooltip.
   assert.match(workspace, /members\.slice\(0, 6\)\.map\(/)
   assert.match(workspace, /title: members\.map\(b => displayName\(b, botRosterMeta\(b, allMeta\)\)\)\.join\(', '\)/)
+})
+
+test('fork change: unset room mode keeps exact stock/extended global-toggle behavior', () => {
+  const gc = load(() => '(pass)')
+  // No room record / no mode → stock defaults, same as pre-mode behavior.
+  let c = gc.getGroupChatCeilings('UnsetRoom', MEMBERS)
+  assert.equal(c.mode, null)
+  assert.equal(c.maxRounds, 3)
+  assert.equal(c.maxMessages, 10)
+  assert.equal(c.wallClockMs, null)
+  assert.equal(c.autoSummary, false)
+  assert.equal(c.toolCapable, true)
+
+  gc.setGroupChatExtendedMode(true)
+  c = gc.getGroupChatCeilings('UnsetRoom', MEMBERS)
+  assert.equal(c.mode, null)
+  assert.equal(c.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS)
+  assert.equal(c.maxMessages, gc.GROUP_CHAT_EXTENDED_MAX_MESSAGES)
+  assert.equal(c.wallClockMs, gc.GROUP_CHAT_EXTENDED_WALL_CLOCK_MS)
+})
+
+test('fork change: per-room mode overrides the global extended toggle', () => {
+  const gc = load(() => '(pass)')
+  gc.setGroupChatExtendedMode(true)
+  gc.setGroupChatRoomMode('DecideRoom', 'decide')
+
+  const c = gc.getGroupChatCeilings('DecideRoom', MEMBERS)
+  assert.equal(c.mode, 'decide')
+  assert.equal(c.maxRounds, gc.GROUP_CHAT_MODE_PRESETS.decide.maxRounds)
+  assert.equal(c.autoSummary, true)
+  assert.equal(c.toolCapable, false)
+  // Mode wins over extended ceilings.
+  assert.notEqual(c.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS)
+})
+
+test('fork change: message cap scales with member count so large rooms finish their round budget', () => {
+  const gc = load(() => '(pass)')
+  const two = [{ name: 'a' }, { name: 'b' }]
+  const six = [{ name: 'a' }, { name: 'b' }, { name: 'c' }, { name: 'd' }, { name: 'e' }, { name: 'f' }]
+
+  gc.setGroupChatRoomMode('Two', 'build')
+  gc.setGroupChatRoomMode('Six', 'build')
+
+  const c2 = gc.getGroupChatCeilings('Two', two)
+  const c6 = gc.getGroupChatCeilings('Six', six)
+  assert.equal(c2.maxRounds, c6.maxRounds, 'round cap is mode-level, not size-level')
+  assert.ok(c6.maxMessages > c2.maxMessages, `6-member budget ${c6.maxMessages} should exceed 2-member ${c2.maxMessages}`)
+  // Exactly messagesPerMemberPerRound * members * rounds
+  const per = gc.GROUP_CHAT_MODE_PRESETS.build.messagesPerMemberPerRound
+  assert.equal(c2.maxMessages, per * 2 * c2.maxRounds)
+  assert.equal(c6.maxMessages, per * 6 * c6.maxRounds)
+  // A 5-bot stock room used to die at 10 messages (~2 rounds). Build mode
+  // for 5 bots must leave headroom past full-round participation.
+  const five = [{ name: 'a' }, { name: 'b' }, { name: 'c' }, { name: 'd' }, { name: 'e' }]
+  gc.setGroupChatRoomMode('Five', 'build')
+  const c5 = gc.getGroupChatCeilings('Five', five)
+  assert.ok(c5.maxMessages >= 5 * c5.maxRounds, `5-bot build budget ${c5.maxMessages} must cover full round participation`)
+})
+
+test('fork change: invalid room mode is dropped and falls back to global toggle', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Bad', r => {
+    r.mode = 'not-a-real-mode'
+    r.log = r.log || []
+    return r
+  })
+  const c = gc.getGroupChatCeilings('Bad', MEMBERS)
+  assert.equal(c.mode, null)
+  assert.equal(c.maxRounds, 3)
+  assert.equal(gc.normalizeGroupChatRoomMode('BUILD'), 'build')
+  assert.equal(gc.normalizeGroupChatRoomMode(''), null)
+  assert.equal(gc.normalizeGroupChatRoomMode(42), null)
+})
+
+test('fork change: decide mode posts a system summary on message-cap exit', async () => {
+  // Multi-member chatty room: each round every member posts, so the scaled
+  // message ceiling is hit before natural all-pass settle. Solo rooms settle
+  // after one reply (no new delta next round) and never reach a hard cap.
+  const gc = load((profile, prompt, n) => `message ${n} from ${profile} — @everyone keep going`)
+  gc.setGroupChatRoomMode('DecideCap', 'decide')
+  const ceilings = gc.getGroupChatCeilings('DecideCap', MEMBERS)
+  assert.equal(ceilings.mode, 'decide')
+  assert.equal(ceilings.autoSummary, true)
+  assert.ok(ceilings.maxMessages >= MEMBERS.length * 2)
+
+  gc.sendToGroupChat('DecideCap', MEMBERS, 'make a call @everyone')
+  for (let i = 0; i < 800 && (gc.$groupChats.get().DecideCap || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal((gc.$groupChats.get().DecideCap || {}).running, false, 'drive must finish')
+
+  const log = roomLog(gc, 'DecideCap')
+  const memberMsgs = log.filter(e => e.from && e.from.kind === 'member')
+  const system = log.filter(e => e.from && e.from.kind === 'system')
+  assert.ok(memberMsgs.length > 0, 'expected member traffic before the cap')
+  assert.ok(system.length >= 1, `expected a decide-mode system summary, kinds=${log.map(e => e.from.kind).join(',')}`)
+  assert.match(system[system.length - 1].text, /Decide-mode room summary/)
+  assert.match(system[system.length - 1].text, /No kanban card created/)
+})
+
+test('fork change: decide/standing prompts mark the room chat-only; build does not', () => {
+  const gc = load(() => '(pass)')
+  const members = MEMBERS
+  const viewer = members[0]
+  const decidePrompt = gc.buildGroupChatTurnPrompt({
+    groupName: 'D', members, viewer, deltaLines: ['User (user): hi'], toolCapable: false
+  })
+  const buildPrompt = gc.buildGroupChatTurnPrompt({
+    groupName: 'B', members, viewer, deltaLines: ['User (user): hi'], toolCapable: true
+  })
+  assert.match(decidePrompt, /chat-only/)
+  assert.doesNotMatch(buildPrompt, /chat-only/)
+})
+
+test('fork change: room mode persists through updateGroupChat durable map', () => {
+  const gc = load(() => '(pass)')
+  gc.setGroupChatRoomMode('PersistMe', 'standing')
+  assert.equal(gc.$groupChats.get().PersistMe.mode, 'standing')
+  const written = gc.storageWrites.get('group-chats')
+  assert.ok(written, 'expected group-chats storage write')
+  assert.equal(written.PersistMe.mode, 'standing')
+
+  gc.setGroupChatRoomMode('PersistMe', null)
+  assert.equal(gc.$groupChats.get().PersistMe.mode, undefined)
+  const cleared = gc.storageWrites.get('group-chats')
+  assert.equal(cleared.PersistMe.mode, undefined)
+})
+
+test('fork change: room header exposes a mode dropdown (settings surface)', () => {
+  assert.match(pluginSource, /setGroupChatRoomMode\(group, 'build'\)/)
+  assert.match(pluginSource, /setGroupChatRoomMode\(group, 'decide'\)/)
+  assert.match(pluginSource, /setGroupChatRoomMode\(group, 'standing'\)/)
+  assert.match(pluginSource, /'aria-label': `Room mode: \$\{modeLabel\}`/)
 })
