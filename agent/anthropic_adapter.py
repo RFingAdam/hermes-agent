@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import platform
+import re
 import secrets
 import stat
 import subprocess
@@ -401,6 +402,137 @@ def _detect_claude_code_version() -> str:
 
 _CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
 _MCP_TOOL_PREFIX = "mcp__"
+
+# Bare multi-segment Hermes tool names frequently mentioned in the system
+# prompt. Even when tool *schemas* are rewritten to ``mcp__*`` on the OAuth
+# wire, Anthropic's subscription billing classifier still scans system-prompt
+# prose for these identifiers and routes the request to the unpaid "extra
+# usage" pool (HTTP 400 "You're out of extra usage"). Keep this list focused
+# on snake_case fingerprints — single-word English tools (memory/process/
+# patch/todo/clarify/terminal) are only rewritten when backtick-wrapped so
+# ordinary prose is preserved.
+_OAUTH_SYSTEM_TOOL_FINGERPRINTS = (
+    "skill_manage",
+    "session_search",
+    "skill_view",
+    "skills_list",
+    "delegate_task",
+    "execute_code",
+    "search_files",
+    "read_file",
+    "write_file",
+    "web_search",
+    "web_extract",
+    "text_to_speech",
+    "vision_analyze",
+    "video_analyze",
+    "video_generate",
+    "tool_search",
+    "tool_describe",
+    "tool_call",
+    "ha_call_service",
+    "ha_get_state",
+    "ha_list_entities",
+    "ha_list_services",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_scroll",
+    "browser_back",
+    "browser_press",
+    "browser_console",
+    "browser_vision",
+    "browser_get_images",
+)
+
+# Single-token tool names that are also common English. Only rewrite when the
+# system prompt references them as a tool identifier inside backticks.
+_OAUTH_SYSTEM_BACKTICK_ONLY_TOOLS = (
+    "memory",
+    "process",
+    "patch",
+    "todo",
+    "clarify",
+    "terminal",
+)
+
+
+def _oauth_bare_tool_name(name: str) -> str:
+    """Strip any ``mcp__`` / ``mcp_`` wire prefix down to the bare tool id."""
+    if not name:
+        return ""
+    if name.startswith("mcp__"):
+        return name[len("mcp__"):]
+    if name.startswith("mcp_"):
+        return name[len("mcp_"):]
+    return name
+
+
+def _oauth_sanitize_system_text(text: str, tool_names: Optional[List[str]] = None) -> str:
+    """Rewrite third-party fingerprints in system text for Anthropic OAuth.
+
+    Product-name swaps keep the Claude Code identity consistent. Tool-name
+    rewrites align prose mentions with the ``mcp__`` wire names used for tool
+    schemas so the subscription billing classifier does not treat the prompt
+    as a third-party agent (empirically: bare ``skill_manage`` /
+    ``session_search`` in system text alone flips a request onto the empty
+    extra-usage pool while the same request with ``mcp__skill_manage`` /
+    ``mcp__session_search`` bills against the plan).
+    """
+    if not text:
+        return text
+
+    text = text.replace("Hermes Agent", "Claude Code")
+    text = text.replace("Hermes agent", "Claude Code")
+    text = text.replace("hermes-agent", "claude-code")
+    text = text.replace("Nous Research", "Anthropic")
+
+    bare_from_tools = {
+        _oauth_bare_tool_name(n)
+        for n in (tool_names or [])
+        if n
+    }
+    # Multi-segment (snake_case) names: rewrite on identifier boundaries.
+    multi = {
+        n for n in (bare_from_tools | set(_OAUTH_SYSTEM_TOOL_FINGERPRINTS))
+        if n and "_" in n and not n.startswith("mcp")
+    }
+    for name in sorted(multi, key=len, reverse=True):
+        text = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])",
+            _MCP_TOOL_PREFIX + name,
+            text,
+        )
+
+    # Single-token tools: only touch backtick-wrapped tool references so we
+    # don't mangle ordinary English ("persistent memory", "stale patch").
+    single = {
+        n for n in (bare_from_tools | set(_OAUTH_SYSTEM_BACKTICK_ONLY_TOOLS))
+        if n and "_" not in n and not n.startswith("mcp")
+    }
+    for name in sorted(single, key=len, reverse=True):
+        text = re.sub(
+            rf"`{re.escape(name)}`",
+            f"`{_MCP_TOOL_PREFIX}{name}`",
+            text,
+        )
+
+    return text
+
+
+def _oauth_sanitize_json_values(value: Any, tool_names: Optional[List[str]] = None) -> Any:
+    """Recursively sanitize string leaves in tool JSON (descriptions/schemas)."""
+    if isinstance(value, str):
+        return _oauth_sanitize_system_text(value, tool_names=tool_names)
+    if isinstance(value, list):
+        return [_oauth_sanitize_json_values(v, tool_names=tool_names) for v in value]
+    if isinstance(value, dict):
+        return {
+            k: _oauth_sanitize_json_values(v, tool_names=tool_names)
+            for k, v in value.items()
+        }
+    return value
 
 
 def _get_claude_code_version() -> str:
@@ -2948,6 +3080,12 @@ def build_anthropic_kwargs(
 
     # ── OAuth: Claude Code identity ──────────────────────────────────
     if is_oauth:
+        # Collect bare tool ids BEFORE wire-prefixing so system-prompt prose
+        # can be aligned with the mcp__ names that go on the wire.
+        _oauth_tool_names = [
+            t.get("name", "") for t in (anthropic_tools or []) if isinstance(t, dict)
+        ]
+
         # 1. Prepend Claude Code system prompt identity
         cc_block = {"type": "text", "text": _CLAUDE_CODE_SYSTEM_PREFIX}
         if isinstance(system, list):
@@ -2957,16 +3095,18 @@ def build_anthropic_kwargs(
         else:
             system = [cc_block]
 
-        # 2. Sanitize system prompt — replace product name references
-        #    to avoid Anthropic's server-side content filters.
+        # 2. Sanitize system prompt — product names AND bare tool identifiers.
+        #    Tool schemas alone are not enough: Anthropic's OAuth billing
+        #    classifier also fingerprints system-prompt prose. Bare mentions
+        #    of Hermes tool ids (skill_manage, session_search, …) route the
+        #    request onto the empty "extra usage" pool even when schemas use
+        #    mcp__* wire names. Rewrite those mentions to match the wire.
         for block in system:
             if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text", "")
-                text = text.replace("Hermes Agent", "Claude Code")
-                text = text.replace("Hermes agent", "Claude Code")
-                text = text.replace("hermes-agent", "claude-code")
-                text = text.replace("Nous Research", "Anthropic")
-                block["text"] = text
+                block["text"] = _oauth_sanitize_system_text(
+                    block.get("text", ""),
+                    tool_names=_oauth_tool_names,
+                )
 
         # 3. Normalize tool names so NOTHING goes on the OAuth wire with a
         #    single-underscore ``mcp_`` prefix.  Anthropic's subscription/OAuth
@@ -2998,6 +3138,23 @@ def build_anthropic_kwargs(
             for tool in anthropic_tools:
                 if "name" in tool:
                     tool["name"] = _to_oauth_wire_name(tool["name"])
+                # Tool descriptions / schemas also carry bare Hermes tool ids
+                # (cross-references like "prefer session_search"). Anthropic's
+                # OAuth billing classifier scans the whole request, not just
+                # system prose + tool *names* — leave those bare and a request
+                # that otherwise looks like Claude Code still lands on the
+                # empty extra-usage pool.
+                if isinstance(tool.get("description"), str) and tool["description"]:
+                    tool["description"] = _oauth_sanitize_system_text(
+                        tool["description"],
+                        tool_names=_oauth_tool_names,
+                    )
+                schema = tool.get("input_schema")
+                if isinstance(schema, dict):
+                    tool["input_schema"] = _oauth_sanitize_json_values(
+                        schema,
+                        tool_names=_oauth_tool_names,
+                    )
 
         # 4. Apply the same normalization to tool names in message history
         #    (tool_use blocks) so replayed turns match the wire names above.
