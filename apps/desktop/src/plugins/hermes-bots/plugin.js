@@ -98,6 +98,23 @@ let watermarksSeeded = false
  *  unread badge already carries the signal. Persisted via ctx.storage. */
 const $activityToasts = atom(false)
 
+/** User pref: allow group-chat rooms to run many more rounds per user send
+ *  (24 rounds / 120 messages / 30-min wall-clock cap) instead of upstream's
+ *  stock 3 rounds / 10 messages / no wall-clock cap. Default OFF — a fresh
+ *  install behaves exactly like upstream until a user opts in. Persisted via
+ *  ctx.storage so the choice survives restarts; NOT retroactive to an
+ *  already-running room drive (it reads ceilings once per user send). Local
+ *  fork addition (2026-08-23, RFingAdam/hermes-agent) — declared here
+ *  (alongside $activityToasts, not down in the group-chat section) because a
+ *  standalone test harness (soul-protocol-backfill.test.mjs) slices and
+ *  vm-evals a fixed line range further down in this file without `atom` in
+ *  scope; keeping every top-level `atom(...)` call above that slice avoids
+ *  breaking it.
+ *  See the group-chat section below (search GROUP_CHAT_STOCK_MAX_ROUNDS) for
+ *  GROUP_CHAT_EXTENDED_* constants, setGroupChatExtendedMode,
+ *  applyGroupChatExtendedOverride, and getGroupChatCeilings. */
+const $groupChatExtendedMode = atom(false)
+
 /** Flip the activity-toast pref and persist it. */
 function setActivityToasts(enabled) {
   $activityToasts.set(enabled)
@@ -3206,10 +3223,112 @@ function knownGroups(metaByName) {
 // turn in its OWN persistent per-group Hermes session and is fed only the
 // room messages that are NEW since it last saw the room.
 
-const GROUP_CHAT_MAX_ROUNDS = 3
-const GROUP_CHAT_MAX_MESSAGES = 10
+// Local fork change (2026-08-23, RFingAdam/hermes-agent): our multi-bot rooms
+// (Ironhaven Exec, Engineering Ops, Bounty Ops, General Workbots) want to keep
+// working turn-over-turn on a task instead of hitting a fixed 3-round wall
+// mid-work — but we'd rather ship that as an explicit opt-in than silently
+// change upstream's shipped behavior for everyone. STOCK_* below is byte-
+// identical to what NousResearch ships (3 rounds / 10 messages, no wall-clock
+// cap — matches upstream's absence of one). EXTENDED_* only takes effect once
+// a user flips "Extended rounds" on for this install; flipping it back off
+// always restores exact stock behavior regardless of any stored override.
+//
+// Extended mode also adds a protection stock doesn't have: a wall-clock
+// ceiling on the whole room-turn drive, independent of the round/message
+// caps. Rationale: the existing "everyone passed this round" settle exit is
+// good but conversation-shaped (it only ends a round where literally every
+// member replied "(pass)" or timed out) — running MANY more rounds increases
+// the exposure window if a member ever gets stuck producing real-looking
+// text every turn without settling (a runaway "still working on it..."
+// loop). A wall-clock cap bounds worst-case cost/duration even in that case,
+// independent of whether the pass-detection heuristic ever fires.
+const GROUP_CHAT_STOCK_MAX_ROUNDS = 3
+const GROUP_CHAT_STOCK_MAX_MESSAGES = 10
+const GROUP_CHAT_EXTENDED_MAX_ROUNDS = 24
+const GROUP_CHAT_EXTENDED_MAX_MESSAGES = 120
+const GROUP_CHAT_EXTENDED_WALL_CLOCK_MS = 30 * 60 * 1000 // 30 min, extended mode only
 const GROUP_CHAT_HISTORY_LIMIT = 24
 const GROUP_CHAT_MAX_MEMBERS = 6
+
+// $groupChatExtendedMode itself is declared near $activityToasts, up top —
+// see the comment there for why (a standalone test harness vm-evals a fixed
+// line-range slice of this file that starts after this point but has no
+// `atom` in scope).
+
+/** Optional fine-tuning of the extended-mode ceilings, ONLY consulted while
+ *  extended mode is on — flipping extended mode off always reverts to the
+ *  exact stock constants regardless of what's stored here. Shape:
+ *  { maxRounds, maxMessages, wallClockMinutes }. Malformed/out-of-range
+ *  fields are ignored field-by-field, falling back to the EXTENDED_* default
+ *  for that field — a bad stored value can never brick the room loop or
+ *  escape the hard clamp ranges below. */
+let $groupChatExtendedOverride = {}
+
+/** Flip extended mode and persist it. */
+function setGroupChatExtendedMode(enabled) {
+  $groupChatExtendedMode.set(Boolean(enabled))
+
+  try {
+    Promise.resolve(pluginCtx?.storage?.set?.('group-chat-extended-mode', Boolean(enabled))).catch(() => undefined)
+  } catch {
+    /* storage unavailable — pref holds for this window only */
+  }
+}
+
+/** Validate + store an extended-mode override, field-by-field, each clamped
+ *  to a hard range that can never be escaped regardless of stored input:
+ *  rounds 1-100, messages 1-500, wall-clock 1s-2h. Values outside range (or
+ *  non-finite) are dropped, not clamped-to-boundary — an accidental huge
+ *  number falls back to the safe EXTENDED_* default for that field instead
+ *  of silently becoming "as large as allowed". Wall-clock accepts either
+ *  `wallClockMinutes` (whole minutes, what a settings UI would offer) or a
+ *  precise `wallClockMs` (raw milliseconds, for programmatic/test use) —
+ *  when both are present the more precise `wallClockMs` wins. */
+function applyGroupChatExtendedOverride(value) {
+  if (!value || typeof value !== 'object') {
+    $groupChatExtendedOverride = {}
+    return
+  }
+
+  const next = {}
+  const rounds = Number(value.maxRounds)
+  const messages = Number(value.maxMessages)
+  const wallClockMinutes = Number(value.wallClockMinutes)
+  const wallClockMsRaw = Number(value.wallClockMs)
+
+  if (Number.isFinite(rounds) && rounds >= 1 && rounds <= 100) {
+    next.maxRounds = Math.floor(rounds)
+  }
+
+  if (Number.isFinite(messages) && messages >= 1 && messages <= 500) {
+    next.maxMessages = Math.floor(messages)
+  }
+
+  if (Number.isFinite(wallClockMsRaw) && wallClockMsRaw >= 1000 && wallClockMsRaw <= 2 * 60 * 60 * 1000) {
+    next.wallClockMs = Math.floor(wallClockMsRaw)
+  } else if (Number.isFinite(wallClockMinutes) && wallClockMinutes >= 1 && wallClockMinutes <= 120) {
+    next.wallClockMs = Math.floor(wallClockMinutes * 60 * 1000)
+  }
+
+  $groupChatExtendedOverride = next
+}
+
+/** Effective ceilings for the CURRENT mode — a live read, since extended
+ *  mode / its override can change between room-turn drives. `wallClockMs`
+ *  is null under stock mode (matches upstream: no wall-clock cap existed
+ *  before this fork). Exists so tests (and any future settings UI) observe
+ *  the real in-effect numbers rather than a closed-over snapshot. */
+function getGroupChatCeilings() {
+  if (!$groupChatExtendedMode.get()) {
+    return { maxRounds: GROUP_CHAT_STOCK_MAX_ROUNDS, maxMessages: GROUP_CHAT_STOCK_MAX_MESSAGES, wallClockMs: null }
+  }
+
+  return {
+    maxRounds: $groupChatExtendedOverride.maxRounds ?? GROUP_CHAT_EXTENDED_MAX_ROUNDS,
+    maxMessages: $groupChatExtendedOverride.maxMessages ?? GROUP_CHAT_EXTENDED_MAX_MESSAGES,
+    wallClockMs: $groupChatExtendedOverride.wallClockMs ?? GROUP_CHAT_EXTENDED_WALL_CLOCK_MS
+  }
+}
 
 /** "(pass)" (loosely: pass / (pass) / pass.) or empty = the member stayed silent. */
 function isGroupPassText(text) {
@@ -3618,20 +3737,30 @@ async function runGroupChatMemberTurn(group, member, prompt) {
 
 /** Drive one bounded round-robin room turn. Serial — one member at a time.
  *  A newer user send bumps the room epoch; this loop notices at the next
- *  member boundary, bails, and the newest send's own loop takes over. */
+ *  member boundary, bails, and the newest send's own loop takes over.
+ *  Ceilings (rounds/messages/wall-clock) are read ONCE at drive start via
+ *  getGroupChatCeilings() — stock mode unless the user opted into extended
+ *  mode, in which case a wall-clock deadline also applies (null under
+ *  stock, matching upstream's original absence of one). */
 async function runGroupChatRounds(group, members) {
   const startEpoch = ($groupChats.get()[group] || {}).epoch || 0
   const isCurrent = () => (($groupChats.get()[group] || {}).epoch || 0) === startEpoch
+  const { maxRounds, maxMessages, wallClockMs } = getGroupChatCeilings()
+  const deadline = wallClockMs ? Date.now() + wallClockMs : null
   let posted = 0
 
   try {
-    for (let round = 0; round < GROUP_CHAT_MAX_ROUNDS; round++) {
+    for (let round = 0; round < maxRounds; round++) {
+      if (deadline && Date.now() >= deadline) {
+        return // extended-mode wall-clock cap reached
+      }
+
       const roomLog = ($groupChats.get()[group] || {}).log || []
       const responders = rotateGroupSpeakers(resolveGroupResponders(roomLog, members), round)
       let spokeThisRound = 0
 
       for (const member of responders) {
-        if (!isCurrent() || posted >= GROUP_CHAT_MAX_MESSAGES) {
+        if (!isCurrent() || posted >= maxMessages || (deadline && Date.now() >= deadline)) {
           return
         }
 
@@ -7775,6 +7904,7 @@ function BotsPane() {
   const [grouping, setGrouping] = useState(null)
   const [query, setQuery] = useState('')
   const activityToasts = useValue($activityToasts)
+  const groupChatExtendedMode = useValue($groupChatExtendedMode)
   const sessionsWorkspaceName = useValue($botSessionsWorkspace)
   const groupChatName = useValue($groupChatWorkspace)
   const groupNeedsYou = useValue($groupNeedsYou)
@@ -7900,6 +8030,27 @@ function BotsPane() {
                     'flex size-6 items-center justify-center rounded-md text-(--ui-text-tertiary) transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
                   onClick: () => setActivityToasts(!activityToasts),
                   children: jsx(Codicon, { name: activityToasts ? 'bell' : 'bell-slash' })
+                })
+              }),
+              // Fork addition: opt-in "extended rounds" for group chats — OFF
+              // is exact upstream stock behavior (3 rounds / 10 messages, no
+              // wall-clock cap). ON raises the ceilings for longer-running
+              // multi-turn rooms and adds a 30-min wall-clock cap as an
+              // independent protection. Default OFF, so a fresh install
+              // never silently diverges from what NousResearch ships.
+              jsx(Tip, {
+                label: groupChatExtendedMode
+                  ? 'Extended group-chat rounds ON (up to 24 rounds / 30 min) — click for stock (3 rounds)'
+                  : 'Stock group-chat rounds (3 max) — click to enable extended (up to 24 rounds / 30 min)',
+                children: jsxs('button', {
+                  type: 'button',
+                  'aria-label': groupChatExtendedMode ? 'Disable extended group-chat rounds' : 'Enable extended group-chat rounds',
+                  className: cn(
+                    'flex size-6 items-center justify-center rounded-md transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
+                    groupChatExtendedMode ? 'text-(--ui-accent,#4f9cf9)' : 'text-(--ui-text-tertiary)'
+                  ),
+                  onClick: () => setGroupChatExtendedMode(!groupChatExtendedMode),
+                  children: jsx(Codicon, { name: 'watch' })
                 })
               }),
               // Eye toggle appears only once something is hidden — zero
@@ -8283,6 +8434,30 @@ export default {
         .catch(() => undefined)
     } catch {
       /* no storage — default (silent) stays */
+    }
+
+    // Hydrate the group-chat extended-rounds opt-in + its optional override
+    // (fork addition — see setGroupChatExtendedMode/applyGroupChatExtendedOverride
+    // above). Absent/malformed storage keeps stock behavior (default OFF) —
+    // a fresh install is byte-identical to upstream until a user opts in.
+    try {
+      Promise.resolve(ctx.storage?.get?.('group-chat-extended-mode'))
+        .then(value => {
+          if (typeof value === 'boolean') {
+            $groupChatExtendedMode.set(value)
+          }
+        })
+        .catch(() => undefined)
+    } catch {
+      /* no storage — stock mode stays */
+    }
+
+    try {
+      Promise.resolve(ctx.storage?.get?.('group-chat-extended-override'))
+        .then(value => applyGroupChatExtendedOverride(value))
+        .catch(() => undefined)
+    } catch {
+      /* no storage — extended-mode defaults stay */
     }
 
     // Hydrate persisted group-chat room logs (epoch/running are runtime-only

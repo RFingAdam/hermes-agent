@@ -42,7 +42,9 @@ function load(turnScript) {
           const transcript = transcripts.get(profile) || []
           transcript.push({ role: 'user', content: params.text })
           calls.push({ profile, prompt: params.text })
-          const reply = turnScript(profile, params.text, calls.length)
+          // turnScript may be sync or async (a real setTimeout-based delay
+          // simulating turn latency) — always await so both shapes work.
+          const reply = await turnScript(profile, params.text, calls.length)
           transcript.push({ role: 'assistant', content: reply })
           transcripts.set(profile, transcript)
           return {}
@@ -62,7 +64,7 @@ function load(turnScript) {
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, disbandGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, disbandGroupChat, $groupChats, $groupNeedsYou, $groupChatWorkspace, $botMeta, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -159,7 +161,147 @@ test('hard caps: chatty members stop at GROUP_CHAT_MAX_MESSAGES total', async ()
   }
 
   const memberMessages = roomLog(gc, 'Loud').filter(e => e.from.kind === 'member')
-  assert.ok(memberMessages.length <= gc.GROUP_CHAT_MAX_MESSAGES, `posted ${memberMessages.length}`)
+  assert.ok(memberMessages.length <= gc.getGroupChatCeilings().maxMessages, `posted ${memberMessages.length}`)
+})
+
+test('fork change: default (stock) ceilings are byte-identical to upstream — extended mode is OFF by default', () => {
+  const gc = load(() => '(pass)')
+  const ceilings = gc.getGroupChatCeilings()
+  assert.equal(gc.$groupChatExtendedMode.get(), false)
+  assert.equal(ceilings.maxRounds, 3)
+  assert.equal(ceilings.maxMessages, 10)
+  assert.equal(ceilings.wallClockMs, null, 'stock mode has no wall-clock cap, matching upstream')
+})
+
+test('fork change: enabling extended mode raises ceilings and adds a wall-clock cap; disabling restores exact stock', () => {
+  const gc = load(() => '(pass)')
+
+  gc.setGroupChatExtendedMode(true)
+  const extended = gc.getGroupChatCeilings()
+  assert.equal(extended.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS)
+  assert.equal(extended.maxMessages, gc.GROUP_CHAT_EXTENDED_MAX_MESSAGES)
+  assert.equal(extended.wallClockMs, gc.GROUP_CHAT_EXTENDED_WALL_CLOCK_MS)
+  assert.ok(extended.maxRounds > 3 && extended.maxMessages > 10)
+
+  gc.setGroupChatExtendedMode(false)
+  const stock = gc.getGroupChatCeilings()
+  assert.equal(stock.maxRounds, 3)
+  assert.equal(stock.maxMessages, 10)
+  assert.equal(stock.wallClockMs, null)
+})
+
+test('fork change: extended-mode override clamps to hard ranges and rejects malformed input field-by-field', () => {
+  const gc = load(() => '(pass)')
+  gc.setGroupChatExtendedMode(true)
+
+  gc.applyGroupChatExtendedOverride({ maxRounds: 50, maxMessages: 300, wallClockMinutes: 10 })
+  let c = gc.getGroupChatCeilings()
+  assert.equal(c.maxRounds, 50)
+  assert.equal(c.maxMessages, 300)
+  assert.equal(c.wallClockMs, 10 * 60 * 1000)
+
+  // Out-of-range values are dropped per-field, falling back to the safe
+  // EXTENDED_* default for that field rather than clamping to a boundary.
+  // Covers both directions: too high (99999) AND below the 1000ms floor
+  // (e.g. 20ms) are equally rejected, not silently clamped up to the floor —
+  // a caller that means "as fast as possible" does not get a surprise
+  // near-instant deadline.
+  gc.applyGroupChatExtendedOverride({ maxRounds: 0, maxMessages: 99999, wallClockMinutes: 999 })
+  c = gc.getGroupChatCeilings()
+  assert.equal(c.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS)
+  assert.equal(c.maxMessages, gc.GROUP_CHAT_EXTENDED_MAX_MESSAGES)
+  assert.equal(c.wallClockMs, gc.GROUP_CHAT_EXTENDED_WALL_CLOCK_MS)
+
+  gc.applyGroupChatExtendedOverride({ wallClockMs: 20 }) // below the 1000ms floor
+  c = gc.getGroupChatCeilings()
+  assert.equal(c.wallClockMs, gc.GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, 'below-floor value rejected, not clamped up to the floor')
+
+  // Malformed shapes never throw and never touch prior valid state.
+  gc.applyGroupChatExtendedOverride({ maxRounds: 20, maxMessages: 50, wallClockMinutes: 5 })
+  gc.applyGroupChatExtendedOverride(null)
+  c = gc.getGroupChatCeilings()
+  assert.equal(c.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS, 'null override resets to extended defaults, not a throw')
+
+  gc.applyGroupChatExtendedOverride({ maxRounds: 20, maxMessages: 50, wallClockMinutes: 5 })
+  gc.applyGroupChatExtendedOverride('nonsense')
+  c = gc.getGroupChatCeilings()
+  assert.equal(c.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS)
+
+  // An override set while extended mode is OFF has zero effect until it's
+  // turned back on — flipping off always means exact stock, full stop.
+  gc.setGroupChatExtendedMode(false)
+  gc.applyGroupChatExtendedOverride({ maxRounds: 99 })
+  c = gc.getGroupChatCeilings()
+  assert.equal(c.maxRounds, 3)
+  assert.equal(c.wallClockMs, null)
+})
+
+test('fork change: a tuned-down extended-mode maxMessages cap is actually enforced by the loop', async () => {
+  const gc = load((profile, prompt, n) => `message ${n} — @everyone keep going`)
+  gc.setGroupChatExtendedMode(true)
+  gc.applyGroupChatExtendedOverride({ maxRounds: 24, maxMessages: 2 })
+
+  gc.sendToGroupChat('Capped', MEMBERS, 'go wild but capped')
+  for (let i = 0; i < 400 && (gc.$groupChats.get().Capped || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  const memberMessages = roomLog(gc, 'Capped').filter(e => e.from.kind === 'member')
+  assert.ok(memberMessages.length <= 2, `posted ${memberMessages.length}, expected <= 2`)
+})
+
+test('fork change: extended-mode wall-clock cap ends the drive early even when nobody settles via all-pass', async () => {
+  // Every turn takes 300ms of REAL async work (a genuine setTimeout in the
+  // outer Node context — turnScript runs outside the vm sandbox, so this is
+  // real wall-clock time, not the vm's synchronous setTimeout mock) before
+  // replying with fresh (non-pass) text — simulates a room that keeps
+  // producing real-looking output and never naturally settles via the
+  // all-pass exit. Round/message ceilings are set high enough that ONLY the
+  // wall-clock deadline can be what stops this drive. wallClockMs is set to
+  // the minimum allowed (1000ms, the hard floor in applyGroupChatExtendedOverride)
+  // so real turn latency (300ms x up to 3 members/round) crosses it within a
+  // couple of rounds.
+  const gc = load(async (profile, prompt, n) => {
+    await new Promise(resolve => setTimeout(resolve, 300))
+    return `still working, turn ${n} — @everyone`
+  })
+  gc.setGroupChatExtendedMode(true)
+  gc.applyGroupChatExtendedOverride({ maxRounds: 100, maxMessages: 500, wallClockMs: 1000 })
+  const before = Date.now()
+
+  gc.sendToGroupChat('Marathon', MEMBERS, 'keep at it')
+  for (let i = 0; i < 100 && (gc.$groupChats.get().Marathon || {}).running; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+
+  const elapsed = Date.now() - before
+  assert.equal((gc.$groupChats.get().Marathon || {}).running, false, 'drive stopped')
+  // At ~300ms/turn x 3 members/round, the 1000ms deadline should stop this
+  // within 2 rounds (well under the 100-round/500-message ceilings).
+  const memberMessages = roomLog(gc, 'Marathon').filter(e => e.from.kind === 'member')
+  assert.ok(memberMessages.length < 100 * MEMBERS.length, `expected an early stop, posted ${memberMessages.length}`)
+  assert.ok(elapsed < 5000, `expected the deadline to end this quickly, took ${elapsed}ms`)
+})
+
+test('fork change: stock mode never applies a wall-clock cap, even with an extended-mode override staged', async () => {
+  // A staged override only ever takes effect once extended mode is actually
+  // on (per the earlier "flip off restores exact stock" test) — this proves
+  // the same thing from the loop's perspective: a room run under stock mode
+  // never terminates early via a wall-clock check it doesn't have, even
+  // when a (valid, non-clamped-away) override sits staged in storage.
+  const gc = load((profile, prompt, n) => `message ${n} — @everyone keep going`)
+  gc.applyGroupChatExtendedOverride({ wallClockMs: 1000 }) // valid value, would fire in ~1s if wrongly honored
+  // extended mode intentionally left OFF (the default)
+
+  gc.sendToGroupChat('StockOnly', MEMBERS, 'go')
+  for (let i = 0; i < 400 && (gc.$groupChats.get().StockOnly || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  const memberMessages = roomLog(gc, 'StockOnly').filter(e => e.from.kind === 'member')
+  // Stopped by the STOCK maxMessages=10 cap (near-instant, no real per-turn
+  // delay in this test's turnScript), not the staged 1000ms deadline.
+  assert.ok(memberMessages.length <= 10, `posted ${memberMessages.length}`)
 })
 
 test('failed member turn is a pass, not a room error', async () => {
