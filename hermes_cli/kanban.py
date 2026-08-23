@@ -2244,6 +2244,33 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str) -> Opti
     return reason if verdict != "done" else None
 
 
+def _project_pr_evidence_rejection(conn, task) -> "str | None":
+    """Require GitHub PR evidence before completing a project-linked task.
+
+    Local addition (not upstream). Guards the fabricated/undelivered-"done"
+    pattern this board has hit repeatedly (t_67182643 "2 fabricated
+    rust-worker completions", t_0f867309 self-closed the same turn it
+    admitted 2/3 planned steps were undone, 7+ other caught instances).
+    Only applies when ``project_id`` is set (task is explicitly tied to a
+    real repo) -- reviews, specs, and ops-triage cards are unaffected.
+    Reuses the same PR-URL pattern the respawn guard already scans
+    comments for, so a task that already has a linked PR just passes.
+    """
+    if task is None or not getattr(task, "project_id", None):
+        return None
+    for c in conn.execute(
+        "SELECT body FROM task_comments WHERE task_id = ?",
+        (task.id,),
+    ).fetchall():
+        if c["body"] and kb._RESPAWN_GUARD_PR_URL_RE.search(c["body"]):
+            return None
+    return (
+        "task has project_id set (linked to a repo) but no GitHub PR URL "
+        "was found in any comment. Post the PR link before completing, or "
+        "if this task genuinely shipped no code, clear its project_id first."
+    )
+
+
 def _cmd_complete(args: argparse.Namespace) -> int:
     """Mark one or more tasks done. Supports a single id or a list."""
     ids = list(args.task_ids or [])
@@ -2287,6 +2314,15 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 print(
                     f"kanban: goal completion of {tid} rejected by judge: {rejection}. "
                     f"Provide evidence matching the task's acceptance criteria.",
+                    file=sys.stderr,
+                )
+                failed.append(tid)
+                continue
+
+            pr_rejection = _project_pr_evidence_rejection(conn, task)
+            if pr_rejection is not None:
+                print(
+                    f"kanban: completion of {tid} rejected: {pr_rejection}",
                     file=sys.stderr,
                 )
                 failed.append(tid)

@@ -132,6 +132,61 @@ def test_complete_happy_path(worker_env):
         conn.close()
 
 
+def test_complete_blocked_by_late_added_parent_link_gives_actionable_error(
+    worker_env,
+):
+    """A parent link added AFTER a task is already running (e.g. via
+    mcp__kanban_link or the dashboard) makes complete_task() return False
+    even though kanban_show reports status=running with a matching
+    run_id the whole time. Before this fix that surfaced as the opaque
+    "unknown id or already terminal" message, which reads exactly like
+    a dispatcher/DB bug and caused a worker to abandon real, verified
+    work (t_f7fa01b0 incident, see kanban board ops t_3bd77dee).
+
+    The fix must: (1) still return an error (behavior unchanged — the
+    task truly cannot complete yet), but (2) name the unmet parent(s)
+    and explain this is expected dependency gating, not corruption, and
+    (3) confirm the run/task state is untouched so the worker knows it
+    is safe to retry once the parent finishes.
+    """
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="late parent", assignee="test-worker")
+        # Link added after worker_env's task was already claimed/running.
+        kb.link_tasks(conn, parent, worker_env)
+    finally:
+        conn.close()
+
+    out = kt._handle_complete({"summary": "done, but gated on a late parent"})
+    d = json.loads(out)
+    assert d.get("ok") is not True
+    err = d.get("error", "")
+    assert parent in err
+    assert "NOT a dispatcher/DB bug" in err
+    assert "still 'running'" in err
+
+    # Task state must be untouched — still running, same run.
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        assert task.status == "running"
+        assert task.current_run_id is not None
+
+        # Finishing the parent must unblock a plain retry.
+        kb.claim_task(conn, parent)
+        kb.complete_task(conn, parent, summary="parent done")
+    finally:
+        conn.close()
+
+    retry_out = kt._handle_complete({"summary": "done, but gated on a late parent"})
+    retry_d = json.loads(retry_out)
+    assert retry_d["ok"] is True
+    assert retry_d["task_id"] == worker_env
+
+
 def test_complete_retry_with_empty_created_cards_succeeds(worker_env):
     """After a phantom rejection, retrying kanban_complete with
     created_cards=[] (the documented escape hatch) must complete the
