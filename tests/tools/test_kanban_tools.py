@@ -139,6 +139,59 @@ def test_complete_happy_path(worker_env):
         conn.close()
 
 
+def _link_worker_task_to_project(tid):
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect()
+    try:
+        with conn:
+            conn.execute("UPDATE tasks SET project_id = ? WHERE id = ?", ("proj-1", tid))
+    finally:
+        conn.close()
+
+
+def test_complete_project_task_without_pr_link_is_rejected(worker_env):
+    """Local guard: a project-linked task cannot close without a PR URL."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    _link_worker_task_to_project(worker_env)
+    out = json.loads(kt._handle_complete({"summary": "shipped it"}))
+    assert "error" in out
+    assert "no GitHub PR URL" in out["error"]
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, worker_env).status == "running"
+    finally:
+        conn.close()
+
+
+def test_complete_project_task_with_pr_link_succeeds(worker_env):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    _link_worker_task_to_project(worker_env)
+    conn = kbc.connect()
+    try:
+        kb.add_comment(conn, worker_env, "test-worker",
+                       "PR: https://github.com/RFingAdam/example/pull/12")
+    finally:
+        conn.close()
+    out = json.loads(kt._handle_complete({"summary": "shipped it"}))
+    assert out.get("ok") is True, out
+
+
+def test_pr_evidence_guard_ignores_tasks_without_project(worker_env):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        assert kt._project_pr_evidence_rejection(conn, task) is None
+    finally:
+        conn.close()
+
+
 def test_complete_retry_with_empty_created_cards_succeeds(worker_env):
     """After a phantom rejection, retrying kanban_complete with
     created_cards=[] (the documented escape hatch) must complete the

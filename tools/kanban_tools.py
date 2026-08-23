@@ -424,6 +424,28 @@ def _goal_judge_available() -> bool:
     return client is not None and bool(model)
 
 
+def _project_pr_evidence_rejection(conn, task) -> Optional[str]:
+    """Require GitHub PR evidence before completing a project-linked task.
+
+    Local addition (not upstream), mirrors hermes_cli/kanban.py -- see that
+    copy for the full rationale. Only applies when ``project_id`` is set.
+    """
+    if task is None or not getattr(task, "project_id", None):
+        return None
+    from hermes_cli.kanban_db_dispatch import _RESPAWN_GUARD_PR_URL_RE
+    for c in conn.execute(
+        "SELECT body FROM task_comments WHERE task_id = ?",
+        (task.id,),
+    ).fetchall():
+        if c["body"] and _RESPAWN_GUARD_PR_URL_RE.search(c["body"]):
+            return None
+    return (
+        "task has project_id set (linked to a repo) but no GitHub PR URL "
+        "was found in any comment. Post the PR link before completing, or "
+        "if this task genuinely shipped no code, clear its project_id first."
+    )
+
+
 # Per-tool guidance for a judge rejection: verdict -> message. ``{reason}``/``{tid}`` are filled in.
 _GOAL_GATE_MESSAGES = {
     "kanban_complete": {
@@ -675,6 +697,9 @@ def _handle_complete(args: dict, **kw) -> str:
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
+        pr_rejection = _project_pr_evidence_rejection(conn, task)
+        if pr_rejection is not None:
+            return tool_error(f"Completion rejected: {pr_rejection}")
         try:
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
