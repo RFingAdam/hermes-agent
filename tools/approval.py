@@ -3876,8 +3876,8 @@ def _run_approval_gate(
         return {
             "approved": False,
             "message": (
-                f"BLOCKED: Action timed out without user response. The user "
-                f"has NOT consented to this action. Do NOT retry it, do NOT "
+                f"BLOCKED: no approval response within the timeout window. "
+                f"This is a TIMEOUT, not a denial. Do NOT retry it, do NOT "
                 f"rephrase it, and do NOT attempt the same outcome via a "
                 f"different path. Silence is not consent."
             ),
@@ -5165,13 +5165,14 @@ def check_all_command_guards(command: str, env_type: str,
         return {
             "approved": False,
             "message": (
-                "BLOCKED: Command timed out without user response. The user "
-                "has NOT consented to this action. Do NOT retry this "
-                "command, do NOT rephrase it, and do NOT attempt the same "
-                "outcome via a different command. Stop the current workflow "
-                "and wait for the user to respond before taking any further "
-                "destructive or irreversible action. Silence is not "
-                f"consent.{breaker_addendum}"
+                "BLOCKED: no approval response within the timeout window. "
+                "This is a TIMEOUT, not a denial - nobody refused this, the "
+                "request simply went unanswered. Silence is not consent, so "
+                "the command did NOT run: do NOT retry it, do NOT rephrase "
+                "it, and do NOT reach the same outcome another way without a "
+                "fresh approval. Report it as blocked awaiting approval - not "
+                "as a decision the user made, and not as work the user "
+                f"rejected.{breaker_addendum}"
             ),
             "pattern_key": primary_key,
             "description": combined_desc,

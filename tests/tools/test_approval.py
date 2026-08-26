@@ -1727,7 +1727,7 @@ class TestApprovalPromptRedaction:
 class TestCliApprovalTimeoutClassifiedSeparately:
     """CLI-path parity for the timeout-vs-deny distinction.
 
-    The gateway wait already reported "timed out without user response";
+    The gateway wait already reported the timeout;
     the CLI/TUI callback path collapsed a prompt timeout into "deny", so
     the agent was told the user *refused* when the user simply never
     answered. The prompt now returns a distinct "timeout" choice and both
@@ -1780,9 +1780,12 @@ class TestCliApprovalTimeoutClassifiedSeparately:
         assert result.get("outcome") == "timeout"
         assert result.get("user_consent") is False
         msg = result["message"]
-        assert "timed out without user response" in msg
+        assert "not a denial" in msg
         assert "Silence is not consent" in msg
         assert "denied" not in msg.lower()
+        # A timeout must never be reported as a refusal: an agent told the
+        # user declined will abandon authorised work permanently.
+        assert "has NOT consented" not in msg
 
     def test_guard_still_classifies_explicit_deny_as_denied(self):
         """Explicit CLI deny keeps outcome='denied' and the denial wording."""
@@ -1826,8 +1829,9 @@ class TestCliApprovalTimeoutClassifiedSeparately:
         assert result["approved"] is False
         assert result.get("outcome") == "timeout"
         assert result.get("user_consent") is False
-        assert "timed out without user response" in result["message"]
+        assert "not a denial" in result["message"]
         assert "Silence is not consent" in result["message"]
+        assert "has NOT consented" not in result["message"]
 
 
 # launchd verbs that stop, unload or deregister a running gateway. `disable`
