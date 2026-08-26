@@ -204,7 +204,7 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, groupSpeakerLabel, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, groupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, $lastRoster, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings, groupTurnIntent, setGroupChatWorkLoop, groupTokenBudget, estimateGroupTokens, setGroupThreadAssignee, groupThreadAssignee, openGroupWorkClaims, hasOpenGroupWorkClaims, GROUP_WORK_NO_PROGRESS_LIMIT, GROUP_WORK_HARD_TURN_BACKSTOP, GROUP_CHAT_MODE_PRESETS, GROUP_CHAT_ROOM_MODES, getModeCeilings, setGroupChatRoomMode, normalizeGroupChatRoomMode, summarizeGroupChat };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, groupSpeakerLabel, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, groupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, $lastRoster, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings, groupTurnIntent, setGroupChatWorkLoop, groupTokenBudget, estimateGroupTokens, groupStatusCounts, setGroupMemberStatus, setGroupThreadAssignee, groupThreadAssignee, openGroupWorkClaims, hasOpenGroupWorkClaims, GROUP_WORK_NO_PROGRESS_LIMIT, GROUP_WORK_HARD_TURN_BACKSTOP, GROUP_CHAT_MODE_PRESETS, GROUP_CHAT_ROOM_MODES, getModeCeilings, setGroupChatRoomMode, normalizeGroupChatRoomMode, summarizeGroupChat };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -2346,7 +2346,7 @@ test('fork change: groupTurnIntent classifies the work-loop sentinels', () => {
   assert.equal(gc.groupTurnIntent(''), 'pass')
   assert.equal(gc.groupTurnIntent('pulled the branch\n(working)'), 'working')
   assert.equal(gc.groupTurnIntent('**Done** shipped it\n- Did: x\n(done)'), 'done')
-  assert.equal(gc.groupTurnIntent('cannot reach the box\n(blocked)'), 'done')
+  assert.equal(gc.groupTurnIntent('cannot reach the box\n(blocked)'), 'blocked')
   assert.equal(gc.groupTurnIntent('just a normal message'), 'reply')
 })
 
@@ -2502,4 +2502,45 @@ test('fork change: assignments survive a reload', () => {
   gc.updateGroupChat('Lanes3', r => { r.log = []; return r })
   gc.setGroupThreadAssignee('Lanes3', 'legacy', 'ops')
   assert.equal(gc.durableGroupChatRooms().Lanes3.assignments.legacy, 'ops')
+})
+
+test('fork change: a finished turn reports itself as ready for review', async () => {
+  const gc = load(profile => (profile === 'builder'
+    ? '**Done** shipped it\n- Did: x\n- Next: none\n- Blockers: none\n(done)'
+    : '(pass)'))
+  gc.updateGroupChat('Status', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder go', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  await gc.runGroupChatRounds('Status', [{ name: 'builder', title: '' }], 'legacy')
+
+  assert.equal(gc.groupStatusCounts('Status').review, 1, 'a (done) turn is waiting on review')
+  assert.equal(gc.groupStatusCounts('Status').blocked, 0)
+})
+
+test('fork change: a blocked turn is counted apart from a finished one', async () => {
+  const gc = load(profile => (profile === 'builder'
+    ? '**Blocked** cannot reach QA\n- Blockers: 120 unreachable\n(blocked)'
+    : '(pass)'))
+  gc.updateGroupChat('Status2', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder go', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  await gc.runGroupChatRounds('Status2', [{ name: 'builder', title: '' }], 'legacy')
+
+  const counts = gc.groupStatusCounts('Status2')
+  assert.equal(counts.blocked, 1, 'blocked is its own state, not "done"')
+  assert.equal(counts.review, 0)
+})
+
+test('fork change: member status survives a reload', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Status3', r => { r.log = []; return r })
+  gc.setGroupMemberStatus('Status3', 'ops', 'review', 'legacy')
+  assert.equal(gc.durableGroupChatRooms().Status3.memberStatus.ops.state, 'review')
+  assert.equal(gc.setGroupMemberStatus('Status3', 'ops', 'bogus', 'legacy'), null, 'unknown states are rejected')
 })

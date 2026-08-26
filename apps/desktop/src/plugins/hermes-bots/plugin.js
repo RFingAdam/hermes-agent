@@ -1070,6 +1070,7 @@ function durableGroupChatRooms(all = $groupChats.get()) {
       syncRevision: Math.max(0, Number(room.syncRevision || 0)),
       working: room.working || {},
       assignments: room.assignments || {},
+      memberStatus: room.memberStatus || {},
       ...(room.workLoop === false ? { workLoop: false } : {})
     }
   }
@@ -6713,8 +6714,11 @@ function groupTurnIntent(text) {
   if (/\(\s*working\s*\)\.?$/i.test(trimmed)) {
     return 'working'
   }
-  if (/\(\s*(done|blocked)\s*\)\.?$/i.test(trimmed)) {
+  if (/\(\s*done\s*\)\.?$/i.test(trimmed)) {
     return 'done'
+  }
+  if (/\(\s*blocked\s*\)\.?$/i.test(trimmed)) {
+    return 'blocked'
   }
 
   return 'reply'
@@ -6795,6 +6799,41 @@ function setGroupThreadAssignee(group, thread, memberKey) {
     return r
   })
   return memberKey || null
+}
+
+/** Where a member stands, so the room is scannable without reading every
+ *  turn. Derived from the same signal the drive already uses, rather than a
+ *  separate protocol the model has to remember. */
+const GROUP_MEMBER_STATES = Object.freeze(['working', 'review', 'blocked', 'idle'])
+
+function setGroupMemberStatus(group, memberKey, state, thread) {
+  if (!GROUP_MEMBER_STATES.includes(state)) {
+    return null
+  }
+
+  updateGroupChat(group, r => {
+    r.memberStatus = {
+      ...(r.memberStatus || {}),
+      [memberKey]: { state, thread: thread || null, at: Date.now() }
+    }
+    return r
+  })
+  return state
+}
+
+/** Counts for the header: how many members are mid-task, waiting on a review,
+ *  or stuck. */
+function groupStatusCounts(group) {
+  const status = ($groupChats.get()[group] || {}).memberStatus || {}
+  const counts = { working: 0, review: 0, blocked: 0, idle: 0 }
+
+  for (const entry of Object.values(status)) {
+    if (entry && counts[entry.state] !== undefined) {
+      counts[entry.state] += 1
+    }
+  }
+
+  return counts
 }
 
 function clearGroupWorkClaim(group, memberKey) {
@@ -7009,7 +7048,7 @@ function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines, tool
   if (workLoop) {
     rules.push(
       '- If you take on a task, work it to completion across turns instead of stopping after one message. End each turn that still has work left with exactly "(working)" on its own final line to keep the floor - you will be given another turn.',
-      '- When the task is finished or you are stuck, end with "(done)" or "(blocked)" on its own final line and include your report:',
+      '- When the task is finished end with "(done)"; when you are stuck end with "(blocked)". They are different states and the room reports them separately - do not use (done) for work you could not finish. Include your report:',
       '  **Done** or **Blocked** followed by one line of outcome, then "- Did:", "- Next:", and "- Blockers:" (write "none" where it does not apply).',
       '- Nobody will cut you off mid-task, so do not rush or pad. Repeating yourself with no new progress releases the claim, so only say "(working)" when you actually advanced something.'
     )
@@ -7099,6 +7138,7 @@ function updateGroupChat(group, mutate, { sync = true } = {}) {
         // window restart resumes the loop instead of dropping it.
         working: room.working || {},
         assignments: room.assignments || {},
+        memberStatus: room.memberStatus || {},
         ...(room.workLoop === false ? { workLoop: false } : {}),
         ...(normalizeGroupChatRoomMode(room.mode) ? { mode: normalizeGroupChatRoomMode(room.mode) } : {})
       }
@@ -8446,6 +8486,19 @@ async function runGroupChatRounds(group, members, thread) {
             // holding the room until the backstop.
             clearGroupWorkClaim(group, memberKey)
           }
+
+          setGroupMemberStatus(
+            group,
+            memberKey,
+            intent === 'working'
+              ? 'working'
+              : intent === 'done'
+                ? 'review'
+                : intent === 'blocked'
+                  ? 'blocked'
+                  : 'idle',
+            thread
+          )
         }
       }
 
@@ -13375,6 +13428,36 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
           children: jsx(Codicon, { name: 'gear' })
         })
       }),
+      // Standing summary: who is mid-task, who is waiting on a review, who
+      // is stuck. Six bots produce a wall of text; this is the line that says
+      // whether any of it needs you.
+      (() => {
+        const counts = groupStatusCounts(group)
+
+        if (!counts.working && !counts.review && !counts.blocked) {
+          return null
+        }
+
+        const parts = []
+
+        if (counts.review) {
+          parts.push({ key: 'review', text: `${counts.review} to review`, tone: 'text-(--ui-accent,#4f9cf9)' })
+        }
+        if (counts.blocked) {
+          parts.push({ key: 'blocked', text: `${counts.blocked} blocked`, tone: 'text-(--ui-warning,#f59e0b)' })
+        }
+        if (counts.working) {
+          parts.push({ key: 'working', text: `${counts.working} working`, tone: 'text-(--ui-text-tertiary)' })
+        }
+
+        return jsx('div', {
+          className: 'flex shrink-0 items-center gap-1.5 text-[0.65rem]',
+          title: 'Reported by each bot at the end of its turn',
+          children: parts.map(part =>
+            jsx('span', { className: part.tone, children: part.text }, part.key)
+          )
+        }, 'status-summary')
+      })(),
       // Per-room mode preset (build / decide / standing). Unset keeps the
       // global stock/extended toggle. Lives on the room header so each room
       // can diverge without touching the install-wide stopwatch.
@@ -15832,6 +15915,7 @@ export default {
                   // resumes instead of silently dropping the work.
                   working: room.working && typeof room.working === 'object' ? room.working : {},
                   assignments: room.assignments && typeof room.assignments === 'object' ? room.assignments : {},
+                  memberStatus: room.memberStatus && typeof room.memberStatus === 'object' ? room.memberStatus : {},
                   ...(room.workLoop === false ? { workLoop: false } : {}),
                   ...(mode ? { mode } : {}),
                   epoch: 0,
