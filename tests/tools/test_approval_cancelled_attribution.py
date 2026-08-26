@@ -61,7 +61,9 @@ def _assert_withdrawn(result, cause):
     assert result["outcome"] == "cancelled"
     assert "denied by user" not in result["message"].lower()
     assert cause in result["message"]
-    assert "NOT consented" in result["message"]  # still fail-closed for the model
+    # Still fail-closed for the model, without claiming the user refused.
+    assert "did NOT run" in result["message"]
+    assert "has NOT consented" not in result["message"]
 
 
 def test_teardown_interrupt_reports_cause_not_user_deny(gateway_session):

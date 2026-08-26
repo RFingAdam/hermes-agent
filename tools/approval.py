@@ -689,6 +689,7 @@ class _GateSpec:
     # read only where a template shows it (reading it logs when tripped).
     notify_failed: str
     gateway_refused: str      # {reason}{reason_addendum}{timeout_addendum}{breaker}
+    gateway_unanswered: str   # {reason}{breaker} -- timeout / withdrawn prompt, not a refusal
     transport_denied: str     # {breaker}
     cli_timeout: str          # {breaker}
     cli_denied: str           # {description}{breaker}
@@ -705,6 +706,18 @@ _STOP_ACTION = (
     " The user has NOT consented to this action. Do NOT retry it, do NOT "
     "rephrase it, and do NOT attempt the same outcome via a different path."
 )
+# An unanswered prompt still fails closed, but nobody refused it. Saying "the
+# user has NOT consented" there reads as a decision: a well-behaved agent then
+# abandons the work and reports it as rejected.
+_UNANSWERED_COMMAND = (
+    " This is not a denial: nobody refused it, the request went unanswered. "
+    "Silence is not consent, so the command did NOT run. Do NOT retry it, do "
+    "NOT rephrase it, and do NOT attempt the same outcome via a different "
+    "command without a fresh approval. Report it as blocked awaiting approval, "
+    "not as a decision the user made or work the user rejected."
+)
+_UNANSWERED_ACTION = (_UNANSWERED_COMMAND.replace("the command did", "the action did")
+                      .replace("a different command", "a different path"))
 
 _COMMAND_GATE = _GateSpec(
     noun="command", transport=True, user_approved=True, redact_cli=False, pending_keys=True,
@@ -716,8 +729,9 @@ _COMMAND_GATE = _GateSpec(
         "transport. The user has NOT consented to this action. Do NOT retry or "
         "attempt the same outcome through another route.{breaker}"
     ),
-    cli_timeout="BLOCKED: Command timed out without user response." + _STOP_COMMAND
-                + " Silence is not consent.{breaker}",
+    gateway_unanswered="BLOCKED: Command {reason}." + _UNANSWERED_COMMAND + "{breaker}",
+    cli_timeout="BLOCKED: no approval response within the timeout window." + _UNANSWERED_COMMAND
+                + "{breaker}",
     cli_denied="BLOCKED: User denied this command." + _STOP_COMMAND + "{breaker}",
     smart_log="Smart approval: auto-approved '{command}' ({description})",
 )
@@ -732,8 +746,9 @@ _EXECUTE_CODE_GATE = _GateSpec(
     transport_denied=(
         "BLOCKED: User denied execute_code through the selected approval transport. The user has NOT consented."
     ),
-    cli_timeout="BLOCKED: Action timed out without user response." + _STOP_ACTION
-                + " Silence is not consent.{breaker}",
+    gateway_unanswered="BLOCKED: execute_code script {reason}." + _UNANSWERED_ACTION + "{breaker}",
+    cli_timeout="BLOCKED: no approval response within the timeout window." + _UNANSWERED_ACTION
+                + "{breaker}",
     cli_denied=(
         "BLOCKED: User denied execute_code script execution (matched "
         "'{description}'). Do NOT retry — the user has explicitly rejected it.{breaker}"
@@ -748,8 +763,8 @@ _ACTION_GATE = _GateSpec(
     gateway_refused="BLOCKED: Action {reason}.{reason_addendum}" + _STOP_ACTION
                     + "{timeout_addendum}",
     transport_denied="",
-    cli_timeout="BLOCKED: Action timed out without user response." + _STOP_ACTION
-                + " Silence is not consent.",
+    gateway_unanswered="BLOCKED: Action {reason}." + _UNANSWERED_ACTION,
+    cli_timeout="BLOCKED: no approval response within the timeout window." + _UNANSWERED_ACTION,
     cli_denied=(
         "BLOCKED: User denied this potentially dangerous action (matched "
         "'{description}'). Do NOT retry — the user has explicitly rejected it."
@@ -878,12 +893,11 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
             if decision.get("cancelled"):
                 # The prompt was withdrawn (turn interrupted or ended) before anyone answered:
                 # still fail closed, but do not attribute a refusal to the user.
-                return deny(spec.gateway_refused, "cancelled",
+                return deny(spec.gateway_unanswered, "cancelled",
                             reason=f"approval was withdrawn before the user answered ({decision['cancelled']})",
-                            reason_addendum="", timeout_addendum="", deny_reason=None)
+                            deny_reason=None)
             if not decision["resolved"]:
-                return deny(spec.gateway_refused, "timeout", reason="timed out without user response",
-                            reason_addendum="", timeout_addendum=" Silence is not consent.",
+                return deny(spec.gateway_unanswered, "timeout", reason="timed out without user response",
                             deny_reason=deny_reason)
             if choice is None or choice == "deny":
                 return deny(spec.gateway_refused, "denied", reason="denied by user",
@@ -920,10 +934,10 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     if choice == "cancelled":
         # The prompt never reached a human (callback raised, no callback under prompt_toolkit, interrupted
         # read): fail closed, but do not attribute a refusal to the user (#22992).
-        return deny(spec.gateway_refused, "cancelled",
+        return deny(spec.gateway_unanswered, "cancelled",
                     reason="was not approved: the approval prompt could not be delivered or was not answered "
                            f"({getattr(choice, 'cause', 'no answer')})",
-                    reason_addendum="", timeout_addendum=" Silence is not consent.", deny_reason=None)
+                    deny_reason=None)
     if choice == "deny":
         # No _record_denial(): the breaker counts consecutive guardian LLM
         # DENY verdicts, not deliberate human denials.
