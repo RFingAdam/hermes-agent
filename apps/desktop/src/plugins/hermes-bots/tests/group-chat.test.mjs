@@ -2443,10 +2443,14 @@ test('fork change: the estimated-token ceiling stops a drive and says so', async
 
   const log = (gc.$groupChats.get().Spendy || {}).log || []
   assert.ok(
-    log.some(e => e.from?.kind === 'system' && /estimated tokens/i.test(e.text || '')),
-    'the room should say it stopped on budget'
+    log.some(e => e.from?.kind === 'system' && /Room stopped at .*ceiling/i.test(e.text || '')),
+    'the room should say it stopped on budget, with the ceiling'
   )
   assert.equal(gc.hasOpenGroupWorkClaims('Spendy', 'legacy'), false, 'claims release when the budget is hit')
+  const note = log.find(e => e.from?.kind === 'system' && /Room stopped at/i.test(e.text || ''))
+  // No backend usage in the harness, so the note must say it is an estimate
+  // rather than implying a billed figure.
+  assert.match(note.text, /character estimate/i)
 })
 
 test('fork change: a room with no explicit budget falls back to its mode preset', () => {

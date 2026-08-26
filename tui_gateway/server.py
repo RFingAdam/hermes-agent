@@ -9677,6 +9677,23 @@ def _live_session_payload(
         payload["pending_approval"] = approval
     if clarify := _pending_clarify_request_payload(sid):
         payload["pending_clarify"] = clarify
+    # What actually SERVED this session, which is not always what it was
+    # configured with. After a provider fallback ``info.model`` still reports
+    # the configured model, so a client showing that reports a reassuring lie:
+    # a session can run start to finish on a fallback provider with nothing on
+    # screen saying so. Usage rows are the record of real calls.
+    try:
+        stored_key = _session_lookup_key(session, fallback=sid)
+        with _session_db(session) as usage_db:
+            usage = None
+            if usage_db is not None:
+                usage = usage_db.get_session_usage_summary(stored_key)
+                if usage is None and stored_key != sid:
+                    usage = usage_db.get_session_usage_summary(sid)
+        if usage:
+            payload["usage"] = usage
+    except Exception as exc:  # never let a reporting read break a resume
+        logger.debug("usage summary unavailable for %s: %s", sid, exc)
     return payload
 
 

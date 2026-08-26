@@ -9058,6 +9058,69 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             ).fetchone()
         return dict(row) if row else None
 
+    def get_session_usage_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """What actually served this session, and what it cost.
+
+        ``sessions.model`` records the model the session was CONFIGURED with;
+        after a provider fallback that is no longer the model answering. A UI
+        that shows the configured value reports a reassuring lie - a room can
+        run an entire session on a fallback provider with nothing on screen
+        saying so. ``session_model_usage`` records the tuple per actual call,
+        so this reports the most recent route plus every distinct model seen.
+
+        ``models`` having more than one entry is the signal worth surfacing:
+        the session changed route mid-flight.
+        """
+        self.flush_token_counts()
+        with self._read_ctx() as conn:
+            rows = conn.execute(
+                """SELECT model, billing_provider, api_call_count, last_seen,
+                          input_tokens, output_tokens, cache_read_tokens,
+                          cache_write_tokens, reasoning_tokens,
+                          estimated_cost_usd
+                     FROM session_model_usage
+                    WHERE session_id = ?
+                      AND model <> 'unknown'
+                    ORDER BY last_seen DESC""",
+                (session_id,),
+            ).fetchall()
+
+        if not rows:
+            return None
+
+        latest = rows[0]
+        totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "api_call_count": 0,
+        }
+        cost = 0.0
+        models = []
+        for row in rows:
+            for key in totals:
+                totals[key] += int(row[key] or 0)
+            cost += float(row["estimated_cost_usd"] or 0.0)
+            entry = (row["model"], row["billing_provider"] or "")
+            if entry not in models:
+                models.append(entry)
+
+        return {
+            "model": latest["model"],
+            "provider": latest["billing_provider"] or "",
+            "models": [{"model": m, "provider": p} for m, p in models],
+            "changed_route": len(models) > 1,
+            "estimated_cost_usd": round(cost, 6),
+            **totals,
+            "total_tokens": (
+                totals["input_tokens"]
+                + totals["output_tokens"]
+                + totals["reasoning_tokens"]
+            ),
+        }
+
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         """Resolve an exact or uniquely prefixed session ID to the full ID.
 

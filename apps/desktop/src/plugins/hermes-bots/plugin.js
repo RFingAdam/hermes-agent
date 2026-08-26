@@ -7860,6 +7860,23 @@ async function runGroupChatMemberTurnLeased(group, member, prompt, thread, image
             thread
           })
 
+          // The route that actually served this turn. Carried onto the room
+          // entry so a fallback is visible in the transcript instead of the
+          // member quietly answering as a different model.
+          if (state?.usage && state.usage.model) {
+            const servedKey = groupMemberKey(member)
+            const served = {
+              model: String(state.usage.model),
+              provider: String(state.usage.provider || ''),
+              changedRoute: Boolean(state.usage.changed_route),
+              totalTokens: Number(state.usage.total_tokens || 0)
+            }
+            updateGroupChat(group, r => {
+              r.servedBy = { ...(r.servedBy || {}), [servedKey]: served }
+              return r
+            })
+          }
+
           return replyText
         }
       }
@@ -8150,6 +8167,27 @@ async function runGroupChatRounds(group, members, thread) {
   let posted = 0
   const tokenBudget = groupTokenBudget(group)
   let spentTokens = 0
+  // Real per-session totals when the backend reports them, character estimate
+  // otherwise. Sessions outlive a drive, so spend is measured as the delta
+  // from each member's total at its first turn in THIS drive.
+  const usageBaseline = new Map()
+
+  const realSpend = () => {
+    const servedBy = ($groupChats.get()[group] || {}).servedBy || {}
+    let total = 0
+    for (const [key, base] of usageBaseline) {
+      const now = Number(servedBy[key]?.totalTokens || 0)
+      if (now > base) {
+        total += now - base
+      }
+    }
+    return total
+  }
+
+  const spendSoFar = () => {
+    const real = realSpend()
+    return real > 0 ? real : spentTokens
+  }
   // 'cap' = hit a hard ceiling; 'settle' = all-pass natural end; decide-mode
   // auto-summary only fires on cap (always useful), never on a clean settle.
   let exitReason = 'cap'
@@ -8172,7 +8210,9 @@ async function runGroupChatRounds(group, members, thread) {
       // Spend ceiling. Unlike the round and wall-clock ceilings this one DOES
       // apply to a member mid-task: a claim means "let me finish", not "spend
       // without limit". Claims are released so nothing silently resumes.
-      if (spentTokens >= tokenBudget) {
+      const spent = spendSoFar()
+
+      if (spent >= tokenBudget) {
         exitReason = 'budget'
         for (const key of openGroupWorkClaims(group, thread)) {
           clearGroupWorkClaim(group, key)
@@ -8180,7 +8220,7 @@ async function runGroupChatRounds(group, members, thread) {
         appendGroupChatEntry(
           group,
           { kind: 'system', name: 'Budget' },
-          `Room stopped at roughly ${spentTokens.toLocaleString()} estimated tokens (ceiling ${tokenBudget.toLocaleString()}). This is a character-based estimate, not a billed figure. Open work claims were released; send a message to continue.`,
+          `Room stopped at ${spent.toLocaleString()} tokens (ceiling ${tokenBudget.toLocaleString()}, ${realSpend() > 0 ? 'reported by the backend' : 'character estimate - the backend reported no usage'}). Open work claims were released; send a message to continue.`,
           thread
         )
         return
@@ -8250,6 +8290,11 @@ async function runGroupChatRounds(group, members, thread) {
         const delta = room.log.slice(seen).filter(e => groupThreadOf(e) === thread)
 
         const memberHasClaim = claimKeys.includes(memberKey)
+
+        if (!usageBaseline.has(memberKey)) {
+          const servedNow = (($groupChats.get()[group] || {}).servedBy || {})[memberKey]
+          usageBaseline.set(memberKey, Number(servedNow?.totalTokens || 0))
+        }
 
         // A member mid-task is continuing its OWN work, not reacting to new
         // messages, so an empty delta must not skip its turn.
@@ -13688,6 +13733,36 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
                                 className: 'text-[0.625rem] text-(--ui-text-quaternary)',
                                 children: relativeTime(entry.at)
                               }),
+                              // Which model actually served this member. The
+                              // configured model is not always the answering
+                              // one: after a fallback a member keeps replying
+                              // as if nothing changed. Amber when the session
+                              // has used more than one route.
+                              (() => {
+                                if (isUser || isSystem) {
+                                  return null
+                                }
+
+                                const servedKey = groupMemberKey(member || { name: entry.from.name })
+                                const served = (room.servedBy || {})[servedKey]
+
+                                if (!served || !served.model) {
+                                  return null
+                                }
+
+                                return jsx('span', {
+                                  className: cn(
+                                    'shrink-0 rounded px-1 text-[0.6rem]',
+                                    served.changedRoute
+                                      ? 'bg-(--ui-warning,#f59e0b)/15 text-(--ui-warning,#f59e0b)'
+                                      : 'text-(--ui-text-quaternary)'
+                                  ),
+                                  title: served.changedRoute
+                                    ? `${served.model} - this session has served turns on more than one model; the configured model is not the only one answering`
+                                    : `served by ${served.model}${served.provider ? ` (${served.provider})` : ''} - most recent route for this member`,
+                                  children: served.model
+                                })
+                              })(),
                               entry.text.trim()
                                 ? jsx('div', {
                                     className:
