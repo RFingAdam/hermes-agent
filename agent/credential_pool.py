@@ -1124,7 +1124,7 @@ class CredentialPool:
         This helper is called while the shared auth-store lock is held and
         re-reads the exact persisted row before a refresh POST is attempted.
         """
-        if self.provider != "xai-oauth":
+        if self.provider not in ("xai-oauth", "anthropic"):
             return entry
         try:
             persisted = next(
@@ -1382,7 +1382,7 @@ class CredentialPool:
         # resolve_codex_runtime_credentials()).  When a waiter finally acquires
         # the lock, the in-lock re-sync below picks up the rotated token the
         # winner persisted and skips the POST.
-        if self.provider in ("openai-codex", "xai-oauth"):
+        if self.provider in ("openai-codex", "xai-oauth", "anthropic"):
             sync_entry = (
                 self._sync_codex_entry_from_auth_store
                 if self.provider == "openai-codex"
@@ -1414,11 +1414,10 @@ class CredentialPool:
         resolves.  Reads the provider's ``HERMES_*_REFRESH_TIMEOUT_SECONDS``
         override.
         """
-        env_var = (
-            "HERMES_CODEX_REFRESH_TIMEOUT_SECONDS"
-            if self.provider == "openai-codex"
-            else "HERMES_XAI_REFRESH_TIMEOUT_SECONDS"
-        )
+        env_var = {
+            "openai-codex": "HERMES_CODEX_REFRESH_TIMEOUT_SECONDS",
+            "anthropic": "HERMES_ANTHROPIC_REFRESH_TIMEOUT_SECONDS",
+        }.get(self.provider, "HERMES_XAI_REFRESH_TIMEOUT_SECONDS")
         refresh_timeout_seconds = auth_mod.env_float(env_var, 20)
         return max(
             float(auth_mod.AUTH_LOCK_TIMEOUT_SECONDS),
@@ -2019,7 +2018,7 @@ class CredentialPool:
                     entry = cleared
                     cleared_any = True
             if refresh and self._entry_needs_refresh(entry):
-                if self.provider in ("openai-codex", "xai-oauth"):
+                if self.provider in ("openai-codex", "xai-oauth", "anthropic"):
                     # Defer single-use-token refresh to avoid holding the
                     # threading lock during cross-process flock + network I/O.
                     sync_fn = (
