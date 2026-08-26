@@ -204,7 +204,7 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, groupSpeakerLabel, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, groupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, $lastRoster, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings, groupTurnIntent, setGroupChatWorkLoop, groupTokenBudget, estimateGroupTokens, openGroupWorkClaims, hasOpenGroupWorkClaims, GROUP_WORK_NO_PROGRESS_LIMIT, GROUP_WORK_HARD_TURN_BACKSTOP, GROUP_CHAT_MODE_PRESETS, GROUP_CHAT_ROOM_MODES, getModeCeilings, setGroupChatRoomMode, normalizeGroupChatRoomMode, summarizeGroupChat };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, groupSpeakerLabel, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, groupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, $lastRoster, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings, groupTurnIntent, setGroupChatWorkLoop, groupTokenBudget, estimateGroupTokens, setGroupThreadAssignee, groupThreadAssignee, openGroupWorkClaims, hasOpenGroupWorkClaims, GROUP_WORK_NO_PROGRESS_LIMIT, GROUP_WORK_HARD_TURN_BACKSTOP, GROUP_CHAT_MODE_PRESETS, GROUP_CHAT_ROOM_MODES, getModeCeilings, setGroupChatRoomMode, normalizeGroupChatRoomMode, summarizeGroupChat };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -2456,4 +2456,46 @@ test('fork change: a room with no explicit budget falls back to its mode preset'
   gc.setGroupChatRoomMode('Modey', 'decide')
   assert.ok(gc.groupTokenBudget('Modey') < dflt, 'decide is tighter than the default')
   assert.ok(gc.estimateGroupTokens('abcd') >= 1)
+})
+
+test('fork change: an assigned thread routes to the assignee, not the first mentioned', async () => {
+  const spoke = []
+  const gc = load(profile => { spoke.push(profile); return '(pass)' })
+  gc.updateGroupChat('Lanes', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder @research both look at this', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+  // research is second in the roster and second in the mention order: if the
+  // assignee is ignored, builder speaks instead and this fails.
+  gc.setGroupThreadAssignee('Lanes', 'legacy', 'research')
+  assert.equal(gc.groupThreadAssignee('Lanes', 'legacy'), 'research')
+
+  await gc.runGroupChatRounds('Lanes', [{ name: 'builder', title: '' }, { name: 'research', title: '' }], 'legacy')
+
+  assert.ok(spoke.includes('research'), 'the assignee works its lane')
+  assert.ok(!spoke.includes('builder'), 'a non-assignee must not work in someone else\'s lane')
+})
+
+test('fork change: clearing the assignee reopens the thread', async () => {
+  const spoke = []
+  const gc = load(profile => { spoke.push(profile); return '(pass)' })
+  gc.updateGroupChat('Lanes2', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@research over to you', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+  gc.setGroupThreadAssignee('Lanes2', 'legacy', 'builder')
+  gc.setGroupThreadAssignee('Lanes2', 'legacy', null)
+  assert.equal(gc.groupThreadAssignee('Lanes2', 'legacy'), null)
+
+  await gc.runGroupChatRounds('Lanes2', [{ name: 'builder', title: '' }, { name: 'research', title: '' }], 'legacy')
+  assert.ok(spoke.includes('research'), 'with no assignee the mentioned member answers again')
+})
+
+test('fork change: assignments survive a reload', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Lanes3', r => { r.log = []; return r })
+  gc.setGroupThreadAssignee('Lanes3', 'legacy', 'ops')
+  assert.equal(gc.durableGroupChatRooms().Lanes3.assignments.legacy, 'ops')
 })

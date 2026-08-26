@@ -1069,6 +1069,7 @@ function durableGroupChatRooms(all = $groupChats.get()) {
       image: room.image || null,
       syncRevision: Math.max(0, Number(room.syncRevision || 0)),
       working: room.working || {},
+      assignments: room.assignments || {},
       ...(room.workLoop === false ? { workLoop: false } : {})
     }
   }
@@ -6771,6 +6772,31 @@ function noteGroupWorkClaim(group, thread, memberKey, reply) {
   return verdict
 }
 
+/** Per-thread ownership. A thread with an assignee is that member's lane:
+ *  nobody else is selected for it, so two bots cannot both decide a task is
+ *  theirs. Coordination in chat ("I'm assigning t_123 to @backend") is a
+ *  statement of intent; this is the thing that actually enforces it. */
+function groupThreadAssignee(group, thread) {
+  const room = $groupChats.get()[group] || {}
+  return (room.assignments || {})[thread] || null
+}
+
+function setGroupThreadAssignee(group, thread, memberKey) {
+  updateGroupChat(group, r => {
+    const assignments = { ...(r.assignments || {}) }
+
+    if (memberKey) {
+      assignments[thread] = memberKey
+    } else {
+      delete assignments[thread]
+    }
+
+    r.assignments = assignments
+    return r
+  })
+  return memberKey || null
+}
+
 function clearGroupWorkClaim(group, memberKey) {
   updateGroupChat(group, r => {
     if (r.working && Object.prototype.hasOwnProperty.call(r.working, memberKey)) {
@@ -7072,6 +7098,7 @@ function updateGroupChat(group, mutate, { sync = true } = {}) {
         // Open work claims: which member is mid-task on which thread, so a
         // window restart resumes the loop instead of dropping it.
         working: room.working || {},
+        assignments: room.assignments || {},
         ...(room.workLoop === false ? { workLoop: false } : {}),
         ...(normalizeGroupChatRoomMode(room.mode) ? { mode: normalizeGroupChatRoomMode(room.mode) } : {})
       }
@@ -8186,11 +8213,17 @@ async function runGroupChatRounds(group, members, thread) {
       const strandedNow = ($groupChats.get()[group] || {}).stranded || {}
       const claimKeys = workLoop ? openGroupWorkClaims(group, thread) : []
       const claimHolders = members.filter(m => claimKeys.includes(groupMemberKey(m)))
+      // An assigned thread is a single member's lane. Everyone else is skipped
+      // for it, no matter who was @mentioned, so parallel bots cannot collide
+      // on the same task.
+      const assignee = groupThreadAssignee(group, thread)
       const responders = [
         ...claimHolders,
         ...rotateGroupSpeakers(resolveGroupResponders(roomLog, members), round)
           .filter(m => !claimKeys.includes(groupMemberKey(m)))
-      ].filter(member => !Object.prototype.hasOwnProperty.call(strandedNow, groupMemberKey(member)))
+      ]
+        .filter(member => !assignee || groupMemberKey(member) === assignee)
+        .filter(member => !Object.prototype.hasOwnProperty.call(strandedNow, groupMemberKey(member)))
       let spokeThisRound = 0
 
       for (const member of responders) {
@@ -15723,6 +15756,7 @@ export default {
                   // Open work claims survive a cold load, so a bot mid-task
                   // resumes instead of silently dropping the work.
                   working: room.working && typeof room.working === 'object' ? room.working : {},
+                  assignments: room.assignments && typeof room.assignments === 'object' ? room.assignments : {},
                   ...(room.workLoop === false ? { workLoop: false } : {}),
                   ...(mode ? { mode } : {}),
                   epoch: 0,
