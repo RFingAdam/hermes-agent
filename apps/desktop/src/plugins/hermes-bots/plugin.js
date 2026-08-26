@@ -1067,7 +1067,9 @@ function durableGroupChatRooms(all = $groupChats.get()) {
       // already carries.
       roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
       image: room.image || null,
-      syncRevision: Math.max(0, Number(room.syncRevision || 0))
+      syncRevision: Math.max(0, Number(room.syncRevision || 0)),
+      working: room.working || {},
+      ...(room.workLoop === false ? { workLoop: false } : {})
     }
   }
 
@@ -6520,6 +6522,21 @@ function setGroupChatRoomMode(group, mode) {
   return nextMode
 }
 
+/** Per-room work-loop switch. Stored only when OFF, so the default-on
+ *  behaviour needs no migration for rooms that predate the flag. */
+function setGroupChatWorkLoop(group, enabled) {
+  const next = enabled !== false
+  updateGroupChat(group, room => {
+    if (next) {
+      delete room.workLoop
+    } else {
+      room.workLoop = false
+    }
+    return room
+  })
+  return next
+}
+
 /** Validate + store an extended-mode override, field-by-field, each clamped
  *  to a hard range that can never be escaped regardless of stored input:
  *  rounds 1-100, messages 1-500, wall-clock 1s-2h. Values outside range (or
@@ -6589,7 +6606,19 @@ function getModeCeilings(mode, memberCount) {
  *  stock/extended toggle; unset mode keeps exact prior behavior (stock or
  *  extended + override). `members` is the live roster at drive time so the
  *  message budget scales with room size. */
+/** Per-room work-loop switch. Default ON for every room; a room opts OUT by
+ *  setting workLoop:false. The loop does NOT grant tools: a chat-first room
+ *  (decide/standing) still loops for multi-turn reasoning and reporting, but
+ *  running tools stays a build-mode decision the user makes explicitly. */
 function getGroupChatCeilings(group, members = []) {
+  const room = typeof group === 'string' ? ($groupChats.get()[group] || {}) : {}
+  const workLoop = room.workLoop !== false
+  const base = resolveGroupChatCeilings(group, members)
+
+  return { ...base, workLoop }
+}
+
+function resolveGroupChatCeilings(group, members = []) {
   const room = typeof group === 'string' ? ($groupChats.get()[group] || {}) : {}
   const mode = normalizeGroupChatRoomMode(room.mode)
   const memberCount = Array.isArray(members) && members.length
@@ -6634,6 +6663,97 @@ function isGroupPassText(text) {
   }
 
   return /^\(?\s*pass\s*\)?\.?$/i.test(trimmed)
+}
+
+// Work-loop sentinels. A member that has claimed work ends its turn with
+// (working) to keep the floor across rounds, or (done)/(blocked) to release it
+// and post its report. Mirrors the existing (pass) contract, so a member that
+// says nothing special behaves exactly as before.
+//
+// There is deliberately NO turn ceiling on a claim: the member decides when it
+// is finished. The only forced exits are a no-progress stall and a hard
+// backstop that matches delegation.max_iterations, so a wedged member reports
+// instead of spinning forever.
+const GROUP_WORK_NO_PROGRESS_LIMIT = 5
+const GROUP_WORK_HARD_TURN_BACKSTOP = 250
+
+function groupTurnIntent(text) {
+  const trimmed = String(text || '').trim()
+
+  if (isGroupPassText(trimmed)) {
+    return 'pass'
+  }
+  if (/\(\s*working\s*\)\.?$/i.test(trimmed)) {
+    return 'working'
+  }
+  if (/\(\s*(done|blocked)\s*\)\.?$/i.test(trimmed)) {
+    return 'done'
+  }
+
+  return 'reply'
+}
+
+/** Signature used to spot a member repeating itself. Whitespace- and
+ *  case-insensitive so trivial rewording still counts as progress. */
+function groupWorkSignature(text) {
+  return String(text || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 400)
+}
+
+function openGroupWorkClaims(group, thread) {
+  const room = $groupChats.get()[group] || {}
+  const working = room.working || {}
+  const holds = room.holds || {}
+
+  return Object.keys(working).filter(
+    key => working[key]?.thread === thread && !Object.prototype.hasOwnProperty.call(holds, key)
+  )
+}
+
+function hasOpenGroupWorkClaims(group, thread) {
+  return openGroupWorkClaims(group, thread).length > 0
+}
+
+/** Record a member's continued claim. Returns 'stuck' when the member has
+ *  repeated itself GROUP_WORK_NO_PROGRESS_LIMIT times, which the caller turns
+ *  into a forced report. */
+function noteGroupWorkClaim(group, thread, memberKey, reply) {
+  const signature = groupWorkSignature(reply)
+  let verdict = 'ok'
+
+  updateGroupChat(group, r => {
+    const working = { ...(r.working || {}) }
+    const prior = working[memberKey]
+    const repeats = prior && prior.signature === signature ? (prior.repeats || 0) + 1 : 0
+
+    if (repeats + 1 >= GROUP_WORK_NO_PROGRESS_LIMIT) {
+      verdict = 'stuck'
+      delete working[memberKey]
+    } else {
+      working[memberKey] = {
+        thread,
+        turns: (prior?.turns || 0) + 1,
+        startedAt: prior?.startedAt || Date.now(),
+        signature,
+        repeats
+      }
+    }
+
+    r.working = working
+    return r
+  })
+
+  return verdict
+}
+
+function clearGroupWorkClaim(group, memberKey) {
+  updateGroupChat(group, r => {
+    if (r.working && Object.prototype.hasOwnProperty.call(r.working, memberKey)) {
+      const working = { ...r.working }
+      delete working[memberKey]
+      r.working = working
+    }
+    return r
+  })
 }
 
 /** Deterministic @mention parse. Handles @name, @"two words" via display
@@ -6817,7 +6937,7 @@ function formatGroupChatLine(entry, viewerName) {
 /** The full per-turn payload for one member: participation rules + the room
  *  delta. Rules travel in the turn payload (not SOUL) so every existing bot
  *  can join a group chat without a profile migration. */
-function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines, toolCapable = true }) {
+function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines, toolCapable = true, workLoop = false }) {
   const viewerKey = groupMemberKey(viewer)
   const peers = members.filter(m => groupMemberKey(m) !== viewerKey)
   const peerNames = peers
@@ -6833,6 +6953,15 @@ function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines, tool
     '- Mention a teammate as @name to pull them in; mention @user only for a judgment call or a result the user needs. Do not repeat points already made.',
     '- Never reveal content from your private 1:1 chats. Your reply text goes to the room verbatim — no preamble, no meta-commentary.'
   ]
+
+  if (workLoop) {
+    rules.push(
+      '- If you take on a task, work it to completion across turns instead of stopping after one message. End each turn that still has work left with exactly "(working)" on its own final line to keep the floor - you will be given another turn.',
+      '- When the task is finished or you are stuck, end with "(done)" or "(blocked)" on its own final line and include your report:',
+      '  **Done** or **Blocked** followed by one line of outcome, then "- Did:", "- Next:", and "- Blockers:" (write "none" where it does not apply).',
+      '- Nobody will cut you off mid-task, so do not rush or pad. Repeating yourself with no new progress releases the claim, so only say "(working)" when you actually advanced something.'
+    )
+  }
 
   if (toolCapable === false) {
     rules.push(
@@ -6914,6 +7043,10 @@ function updateGroupChat(group, mutate, { sync = true } = {}) {
         image: room.image || null,
         syncRevision: Math.max(0, Number(room.syncRevision || 0)),
         // Per-room mode preset (build / decide / standing); absent keeps the global toggle.
+        // Open work claims: which member is mid-task on which thread, so a
+        // window restart resumes the loop instead of dropping it.
+        working: room.working || {},
+        ...(room.workLoop === false ? { workLoop: false } : {}),
         ...(normalizeGroupChatRoomMode(room.mode) ? { mode: normalizeGroupChatRoomMode(room.mode) } : {})
       }
     }
@@ -7959,7 +8092,7 @@ function summarizeGroupChat(group, members) {
 async function runGroupChatRounds(group, members, thread) {
   const startEpoch = ($groupChats.get()[group] || {}).epoch || 0
   const isCurrent = () => (($groupChats.get()[group] || {}).epoch || 0) === startEpoch
-  const { maxRounds, maxMessages, wallClockMs, autoSummary, toolCapable } = getGroupChatCeilings(group, members)
+  const { maxRounds, maxMessages, wallClockMs, autoSummary, toolCapable, workLoop } = getGroupChatCeilings(group, members)
   const deadline = wallClockMs ? Date.now() + wallClockMs : null
   let posted = 0
   // 'cap' = hit a hard ceiling; 'settle' = all-pass natural end; decide-mode
@@ -7967,8 +8100,16 @@ async function runGroupChatRounds(group, members, thread) {
   let exitReason = 'cap'
 
   try {
-    for (let round = 0; round < maxRounds; round++) {
-      if (deadline && Date.now() >= deadline) {
+    for (let round = 0; round < maxRounds || hasOpenGroupWorkClaims(group, thread); round++) {
+      // A member holding a work claim decides for itself when it is done, so
+      // the room's round and wall-clock ceilings must not cut it off mid-task.
+      // The backstop only catches a member that never releases the claim.
+      if (round >= GROUP_WORK_HARD_TURN_BACKSTOP) {
+        exitReason = 'cap'
+        return
+      }
+
+      if (deadline && Date.now() >= deadline && !hasOpenGroupWorkClaims(group, thread)) {
         exitReason = 'cap'
         return
       }
@@ -7998,8 +8139,13 @@ async function runGroupChatRounds(group, members, thread) {
       // value shape, since markers are a bare number pre-thread or
       // {before, thread} post-thread.
       const strandedNow = ($groupChats.get()[group] || {}).stranded || {}
-      const responders = rotateGroupSpeakers(resolveGroupResponders(roomLog, members), round)
-        .filter(member => !Object.prototype.hasOwnProperty.call(strandedNow, groupMemberKey(member)))
+      const claimKeys = workLoop ? openGroupWorkClaims(group, thread) : []
+      const claimHolders = members.filter(m => claimKeys.includes(groupMemberKey(m)))
+      const responders = [
+        ...claimHolders,
+        ...rotateGroupSpeakers(resolveGroupResponders(roomLog, members), round)
+          .filter(m => !claimKeys.includes(groupMemberKey(m)))
+      ].filter(member => !Object.prototype.hasOwnProperty.call(strandedNow, groupMemberKey(member)))
       let spokeThisRound = 0
 
       for (const member of responders) {
@@ -8009,7 +8155,10 @@ async function runGroupChatRounds(group, members, thread) {
           return
         }
 
-        if (posted >= maxMessages || (deadline && Date.now() >= deadline)) {
+        if (
+          !claimKeys.includes(groupMemberKey(member)) &&
+          (posted >= maxMessages || (deadline && Date.now() >= deadline))
+        ) {
           exitReason = 'cap'
           return
         }
@@ -8022,7 +8171,11 @@ async function runGroupChatRounds(group, members, thread) {
         // turn sees only the conversation it's part of.
         const delta = room.log.slice(seen).filter(e => groupThreadOf(e) === thread)
 
-        if (!delta.length) {
+        const memberHasClaim = claimKeys.includes(memberKey)
+
+        // A member mid-task is continuing its OWN work, not reacting to new
+        // messages, so an empty delta must not skip its turn.
+        if (!delta.length && !memberHasClaim) {
           continue
         }
 
@@ -8059,8 +8212,11 @@ async function runGroupChatRounds(group, members, thread) {
           groupName: group,
           members,
           viewer: member,
-          deltaLines: delta.slice(-GROUP_CHAT_HISTORY_LIMIT).map(e => formatGroupChatLine(e, member.name)),
-          toolCapable
+          deltaLines: delta.length
+            ? delta.slice(-GROUP_CHAT_HISTORY_LIMIT).map(e => formatGroupChatLine(e, member.name))
+            : ['(no new messages - continue the task you claimed)'],
+          toolCapable,
+          workLoop
         })
 
         // Images riding this delta (user attachments — member entries don't
@@ -8143,9 +8299,30 @@ async function runGroupChatRounds(group, members, thread) {
           posted += 1
           spokeThisRound += 1
         }
+
+        if (workLoop && reply !== null) {
+          const intent = groupTurnIntent(reply)
+
+          if (intent === 'working') {
+            if (noteGroupWorkClaim(group, thread, memberKey, reply) === 'stuck') {
+              appendGroupChatEntry(
+                group,
+                { kind: 'system', name: 'Work loop' },
+                `@${member.name} made no new progress for ${GROUP_WORK_NO_PROGRESS_LIMIT} turns, so the claim was released. Last state:\n\n${String(reply).trim().slice(0, 400)}`,
+                thread
+              )
+              recordGroupActivity(group, { kind: 'blocked', member: member.name, thread })
+            }
+          } else {
+            // Anything that is not an explicit (working) releases the floor.
+            // A member that forgets the sentinel simply stops, rather than
+            // holding the room until the backstop.
+            clearGroupWorkClaim(group, memberKey)
+          }
+        }
       }
 
-      if (spokeThisRound === 0) {
+      if (spokeThisRound === 0 && !hasOpenGroupWorkClaims(group, thread)) {
         exitReason = 'settle'
         return // everyone passed — the conversation settled
       }
@@ -12890,6 +13067,7 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
         typeof value === 'function' ? value(current.pendingAttachments || {}) : value
     }))
   const roomMode = normalizeGroupChatRoomMode(room.mode)
+  const workLoopOn = room.workLoop !== false
   const ceilings = getGroupChatCeilings(group, members)
   const [confirmDisband, setConfirmDisband] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -13126,6 +13304,17 @@ function GroupChatWorkspace({ group, members, onBack, visible = true }) {
                   jsx(Codicon, { name: 'organization', className: 'mr-1.5' }),
                   'Standing — moderate coordination',
                   roomMode === 'standing' ? jsx('span', { className: 'ml-auto text-[0.65rem] text-(--ui-accent,#4f9cf9)', children: '✓' }) : null
+                ]
+              }),
+              // Work loop is independent of the mode preset: a room can run any
+              // mode with bots either finishing tasks across turns or stopping
+              // after one message.
+              jsxs(DropdownMenuItem, {
+                onSelect: () => setGroupChatWorkLoop(group, !workLoopOn),
+                children: [
+                  jsx(Codicon, { name: 'sync', className: 'mr-1.5' }),
+                  workLoopOn ? 'Work loop on — bots finish tasks' : 'Work loop off — one reply per turn',
+                  workLoopOn ? jsx('span', { className: 'ml-auto text-[0.65rem] text-(--ui-accent,#4f9cf9)', children: '✓' }) : null
                 ]
               })
             ]
@@ -15476,6 +15665,10 @@ export default {
                   roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
                   image: typeof room.image === 'string' && room.image ? room.image : null,
                   syncRevision: Math.max(0, Number(room.syncRevision || 0)),
+                  // Open work claims survive a cold load, so a bot mid-task
+                  // resumes instead of silently dropping the work.
+                  working: room.working && typeof room.working === 'object' ? room.working : {},
+                  ...(room.workLoop === false ? { workLoop: false } : {}),
                   ...(mode ? { mode } : {}),
                   epoch: 0,
                   running: false

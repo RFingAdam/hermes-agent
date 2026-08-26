@@ -204,7 +204,7 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, groupSpeakerLabel, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, groupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, $lastRoster, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings, GROUP_CHAT_MODE_PRESETS, GROUP_CHAT_ROOM_MODES, getModeCeilings, setGroupChatRoomMode, normalizeGroupChatRoomMode, summarizeGroupChat };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, groupSpeakerLabel, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, groupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, $lastRoster, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings, groupTurnIntent, setGroupChatWorkLoop, openGroupWorkClaims, hasOpenGroupWorkClaims, GROUP_WORK_NO_PROGRESS_LIMIT, GROUP_WORK_HARD_TURN_BACKSTOP, GROUP_CHAT_MODE_PRESETS, GROUP_CHAT_ROOM_MODES, getModeCeilings, setGroupChatRoomMode, normalizeGroupChatRoomMode, summarizeGroupChat };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -2336,4 +2336,94 @@ test('fork change: room header exposes a mode dropdown (settings surface)', () =
   assert.match(pluginSource, /setGroupChatRoomMode\(group, 'decide'\)/)
   assert.match(pluginSource, /setGroupChatRoomMode\(group, 'standing'\)/)
   assert.match(pluginSource, /'aria-label': `Room mode: \$\{modeLabel\}`/)
+})
+
+// --- fork change: autonomous work loop -------------------------------------
+
+test('fork change: groupTurnIntent classifies the work-loop sentinels', () => {
+  const gc = load(() => '(pass)')
+  assert.equal(gc.groupTurnIntent('(pass)'), 'pass')
+  assert.equal(gc.groupTurnIntent(''), 'pass')
+  assert.equal(gc.groupTurnIntent('pulled the branch\n(working)'), 'working')
+  assert.equal(gc.groupTurnIntent('**Done** shipped it\n- Did: x\n(done)'), 'done')
+  assert.equal(gc.groupTurnIntent('cannot reach the box\n(blocked)'), 'done')
+  assert.equal(gc.groupTurnIntent('just a normal message'), 'reply')
+})
+
+test('fork change: a member holding a claim keeps the floor past the room round ceiling', async () => {
+  let n = 0
+  const gc = load(profile => {
+    if (profile !== 'builder') return '(pass)'
+    n += 1
+    return n <= 6 ? `step ${n} complete\n(working)` : '**Done** finished\n- Did: it\n- Next: none\n- Blockers: none\n(done)'
+  })
+  gc.updateGroupChat('Grind', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder take this on', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  await gc.runGroupChatRounds('Grind', [{ name: 'builder', title: '' }], 'legacy')
+
+  const builderTurns = gc.calls.filter(c => c.profile === 'builder').length
+  assert.ok(
+    builderTurns > gc.GROUP_CHAT_STOCK_MAX_ROUNDS,
+    `expected the claim to outlive the ${gc.GROUP_CHAT_STOCK_MAX_ROUNDS}-round ceiling, got ${builderTurns} turns`
+  )
+  assert.equal(gc.hasOpenGroupWorkClaims('Grind', 'legacy'), false, '(done) must release the claim')
+})
+
+test('fork change: repeating itself releases the claim and posts a blocked note', async () => {
+  const gc = load(profile => (profile === 'builder' ? 'still thinking about it\n(working)' : '(pass)'))
+  gc.updateGroupChat('Grind', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder go', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  await gc.runGroupChatRounds('Grind', [{ name: 'builder', title: '' }], 'legacy')
+
+  assert.equal(gc.hasOpenGroupWorkClaims('Grind', 'legacy'), false, 'a stalled member must not hold the claim')
+  const log = ($ => $.log || [])(gc.$groupChats.get().Grind || {})
+  assert.ok(
+    log.some(e => e.from?.kind === 'system' && /no new progress/i.test(e.text || '')),
+    'the room should say why the claim was released'
+  )
+})
+
+test('fork change: a room can opt out of the work loop', async () => {
+  let n = 0
+  const gc = load(profile => {
+    if (profile !== 'builder') return '(pass)'
+    n += 1
+    return `step ${n}\n(working)`
+  })
+  gc.updateGroupChat('Quiet', r => {
+    r.workLoop = false
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder go', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  assert.equal(gc.getGroupChatCeilings('Quiet', MEMBERS).workLoop, false)
+  await gc.runGroupChatRounds('Quiet', [{ name: 'builder', title: '' }], 'legacy')
+  assert.equal(gc.hasOpenGroupWorkClaims('Quiet', 'legacy'), false, 'an opted-out room never opens a claim')
+})
+
+test('fork change: the room header toggle flips the work loop and persists only when off', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Toggle', r => { r.log = []; return r })
+
+  assert.equal(gc.getGroupChatCeilings('Toggle', MEMBERS).workLoop, true, 'default is on')
+
+  gc.setGroupChatWorkLoop('Toggle', false)
+  assert.equal(gc.getGroupChatCeilings('Toggle', MEMBERS).workLoop, false)
+  assert.equal(gc.durableGroupChatRooms().Toggle.workLoop, false, 'off must survive a reload')
+
+  gc.setGroupChatWorkLoop('Toggle', true)
+  assert.equal(gc.getGroupChatCeilings('Toggle', MEMBERS).workLoop, true)
+  assert.ok(
+    !Object.prototype.hasOwnProperty.call(gc.durableGroupChatRooms().Toggle, 'workLoop'),
+    'on is the default, so it should not be persisted'
+  )
 })
