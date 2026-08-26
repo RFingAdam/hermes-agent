@@ -6677,6 +6677,32 @@ function isGroupPassText(text) {
 const GROUP_WORK_NO_PROGRESS_LIMIT = 5
 const GROUP_WORK_HARD_TURN_BACKSTOP = 250
 
+// Per-drive spend ceiling. The desktop has no usage/billing RPC, so this is an
+// ESTIMATE from prompt and reply characters, not a billed token count. Treat it
+// as a smoke alarm: it stops a drive that is burning far more than expected, it
+// does not reconcile against the provider. Roughly 4 chars per token.
+const GROUP_TOKEN_CHARS_PER_TOKEN = 4
+const GROUP_TOKEN_BUDGETS = { build: 400000, standing: 120000, decide: 60000 }
+const GROUP_TOKEN_BUDGET_DEFAULT = 200000
+
+function estimateGroupTokens(text) {
+  return Math.ceil(String(text || '').length / GROUP_TOKEN_CHARS_PER_TOKEN)
+}
+
+/** Estimated-token ceiling for a room: explicit per-room tokenBudget wins,
+ *  then the mode preset, then the default. 0 or a negative value disables it. */
+function groupTokenBudget(group) {
+  const room = typeof group === 'string' ? ($groupChats.get()[group] || {}) : {}
+  const explicit = Number(room.tokenBudget)
+
+  if (Number.isFinite(explicit)) {
+    return explicit > 0 ? explicit : Infinity
+  }
+
+  const mode = normalizeGroupChatRoomMode(room.mode)
+  return (mode && GROUP_TOKEN_BUDGETS[mode]) || GROUP_TOKEN_BUDGET_DEFAULT
+}
+
 function groupTurnIntent(text) {
   const trimmed = String(text || '').trim()
 
@@ -8095,6 +8121,8 @@ async function runGroupChatRounds(group, members, thread) {
   const { maxRounds, maxMessages, wallClockMs, autoSummary, toolCapable, workLoop } = getGroupChatCeilings(group, members)
   const deadline = wallClockMs ? Date.now() + wallClockMs : null
   let posted = 0
+  const tokenBudget = groupTokenBudget(group)
+  let spentTokens = 0
   // 'cap' = hit a hard ceiling; 'settle' = all-pass natural end; decide-mode
   // auto-summary only fires on cap (always useful), never on a clean settle.
   let exitReason = 'cap'
@@ -8111,6 +8139,23 @@ async function runGroupChatRounds(group, members, thread) {
 
       if (deadline && Date.now() >= deadline && !hasOpenGroupWorkClaims(group, thread)) {
         exitReason = 'cap'
+        return
+      }
+
+      // Spend ceiling. Unlike the round and wall-clock ceilings this one DOES
+      // apply to a member mid-task: a claim means "let me finish", not "spend
+      // without limit". Claims are released so nothing silently resumes.
+      if (spentTokens >= tokenBudget) {
+        exitReason = 'budget'
+        for (const key of openGroupWorkClaims(group, thread)) {
+          clearGroupWorkClaim(group, key)
+        }
+        appendGroupChatEntry(
+          group,
+          { kind: 'system', name: 'Budget' },
+          `Room stopped at roughly ${spentTokens.toLocaleString()} estimated tokens (ceiling ${tokenBudget.toLocaleString()}). This is a character-based estimate, not a billed figure. Open work claims were released; send a message to continue.`,
+          thread
+        )
         return
       }
       // Deliver any replies that finished after their turn timed out —
@@ -8219,6 +8264,8 @@ async function runGroupChatRounds(group, members, thread) {
           workLoop
         })
 
+        spentTokens += estimateGroupTokens(prompt)
+
         // Images riding this delta (user attachments — member entries don't
         // carry images today, but flatMap keeps this future-proof) get staged
         // into the member's session so the model sees the pixels, not just
@@ -8299,6 +8346,8 @@ async function runGroupChatRounds(group, members, thread) {
           posted += 1
           spokeThisRound += 1
         }
+
+        spentTokens += estimateGroupTokens(reply)
 
         if (workLoop && reply !== null) {
           const intent = groupTurnIntent(reply)

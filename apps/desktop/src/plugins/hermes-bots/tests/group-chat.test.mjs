@@ -204,7 +204,7 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, groupSpeakerLabel, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, groupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, $lastRoster, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings, groupTurnIntent, setGroupChatWorkLoop, openGroupWorkClaims, hasOpenGroupWorkClaims, GROUP_WORK_NO_PROGRESS_LIMIT, GROUP_WORK_HARD_TURN_BACKSTOP, GROUP_CHAT_MODE_PRESETS, GROUP_CHAT_ROOM_MODES, getModeCeilings, setGroupChatRoomMode, normalizeGroupChatRoomMode, summarizeGroupChat };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, groupSpeakerLabel, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, groupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, $lastRoster, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings, groupTurnIntent, setGroupChatWorkLoop, groupTokenBudget, estimateGroupTokens, openGroupWorkClaims, hasOpenGroupWorkClaims, GROUP_WORK_NO_PROGRESS_LIMIT, GROUP_WORK_HARD_TURN_BACKSTOP, GROUP_CHAT_MODE_PRESETS, GROUP_CHAT_ROOM_MODES, getModeCeilings, setGroupChatRoomMode, normalizeGroupChatRoomMode, summarizeGroupChat };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -2426,4 +2426,34 @@ test('fork change: the room header toggle flips the work loop and persists only 
     !Object.prototype.hasOwnProperty.call(gc.durableGroupChatRooms().Toggle, 'workLoop'),
     'on is the default, so it should not be persisted'
   )
+})
+
+test('fork change: the estimated-token ceiling stops a drive and says so', async () => {
+  const long = 'x'.repeat(4000)
+  const gc = load(profile => (profile === 'builder' ? `${long}\n(working)` : '(pass)'))
+  gc.updateGroupChat('Spendy', r => {
+    r.tokenBudget = 2000
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder go', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  assert.equal(gc.groupTokenBudget('Spendy'), 2000)
+  await gc.runGroupChatRounds('Spendy', [{ name: 'builder', title: '' }], 'legacy')
+
+  const log = (gc.$groupChats.get().Spendy || {}).log || []
+  assert.ok(
+    log.some(e => e.from?.kind === 'system' && /estimated tokens/i.test(e.text || '')),
+    'the room should say it stopped on budget'
+  )
+  assert.equal(gc.hasOpenGroupWorkClaims('Spendy', 'legacy'), false, 'claims release when the budget is hit')
+})
+
+test('fork change: a room with no explicit budget falls back to its mode preset', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Modey', r => { r.log = []; return r })
+  const dflt = gc.groupTokenBudget('Modey')
+  gc.setGroupChatRoomMode('Modey', 'decide')
+  assert.ok(gc.groupTokenBudget('Modey') < dflt, 'decide is tighter than the default')
+  assert.ok(gc.estimateGroupTokens('abcd') >= 1)
 })
