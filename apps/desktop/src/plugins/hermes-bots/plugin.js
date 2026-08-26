@@ -14671,7 +14671,6 @@ function BotsPane() {
   const hiddenSectionRef = useRef(null)
   const activityToasts = useValue($activityToasts)
   const groupChatExtendedMode = useValue($groupChatExtendedMode)
-  const sessionsWorkspaceName = useValue($botSessionsWorkspace)
   const groupChatName = useValue($groupChatWorkspace)
   // Main-tab ownership is a module Map; this rev subscription makes the
   // shouldRenderGroupChatInPane gate below reactive to tab open/close
@@ -14745,6 +14744,13 @@ function BotsPane() {
   // non-display consumer continues to receive the complete roster.
   const hiddenExpanded = useValue($showHiddenBots)
   const hiddenBots = roster.filter(bot => isBotHidden(bot, allMeta))
+  // The eye toggle carries a dot when a hidden bot has unread activity, so
+  // hiding a bot never silently buries new messages. Keyed by
+  // botSelectionKey to match how unread is stored elsewhere.
+  const hiddenUnreadByName = useValue($botUnread)
+  const hiddenUnread = hiddenBots.some(
+    bot => !bot.remoteSource && hiddenUnreadByName[botSelectionKey(bot)]
+  )
   const visibleRoster = roster.filter(bot => !isBotHidden(bot, allMeta))
   const gatewayRoster = filterBotsByGateway(visibleRoster, gatewayFilter)
   const filteredRoster = filterBots(gatewayRoster, allMeta, query).filter(bot =>
@@ -15059,20 +15065,20 @@ function BotsPane() {
               // hidden rows are revealed, so Unhide is always reachable.
               hiddenBots.length
                 ? jsx(Tip, {
-                    label: showHidden
+                    label: hiddenExpanded
                       ? 'Hide hidden bots again'
                       : `Show ${hiddenBots.length} hidden bot${hiddenBots.length === 1 ? '' : 's'}`,
                     children: jsxs('button', {
                       type: 'button',
-                      'aria-label': showHidden ? 'Hide hidden bots' : 'Show hidden bots',
+                      'aria-label': hiddenExpanded ? 'Hide hidden bots' : 'Show hidden bots',
                       className: cn(
                         'relative flex size-6 items-center justify-center rounded-md transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
-                        showHidden ? 'text-foreground' : 'text-(--ui-text-tertiary)'
+                        hiddenExpanded ? 'text-foreground' : 'text-(--ui-text-tertiary)'
                       ),
-                      onClick: () => $showHiddenBots.set(!showHidden),
+                      onClick: () => $showHiddenBots.set(!hiddenExpanded),
                       children: [
-                        jsx(Codicon, { name: showHidden ? 'eye' : 'eye-closed' }),
-                        hiddenUnread && !showHidden
+                        jsx(Codicon, { name: hiddenExpanded ? 'eye' : 'eye-closed' }),
+                        hiddenUnread && !hiddenExpanded
                           ? jsx('span', {
                               className:
                                 'absolute right-0.5 top-0.5 size-1.5 rounded-full bg-(--ui-accent,#4f9cf9)',
