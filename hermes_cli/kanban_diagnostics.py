@@ -1078,6 +1078,85 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     )]
 
 
+def _rule_stuck_in_ready_unassigned(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """Task is in ``ready`` status with empty/null assignee for too long.
+
+    Threshold reuses ``stranded_threshold_seconds`` (default 30 min).
+    This surfaces the dispatcher's silent "Skipped (unassigned)" logs
+    (visible only on console) as an actionable diagnostic so unassigned
+    ready tasks no longer rot invisibly forever.
+    """
+    threshold_seconds = float(
+        cfg.get("stranded_threshold_seconds", 30 * 60)
+    )
+    status = _task_field(task, "status")
+    if status != "ready":
+        return []
+    if _task_field(task, "claim_lock"):
+        return []
+    assignee = _task_field(task, "assignee") or ""
+    if assignee.strip():
+        return []
+    # Same ready-transition logic as stranded_in_ready
+    READY_TRANSITION_KINDS = {
+        "created", "promoted", "reclaimed", "unblocked",
+    }
+    last_ready_ts = 0
+    for ev in events:
+        if _event_kind(ev) in READY_TRANSITION_KINDS:
+            t = _event_ts(ev)
+            last_ready_ts = max(last_ready_ts, t)
+    if last_ready_ts == 0:
+        last_ready_ts = int(_task_field(task, "created_at", default=0) or 0)
+    if last_ready_ts == 0:
+        return []
+    age_seconds = now - last_ready_ts
+    if age_seconds < threshold_seconds:
+        return []
+    if age_seconds >= 3600:
+        age_str = f"{age_seconds / 3600:.1f}h"
+    else:
+        age_str = f"{int(age_seconds / 60)}m"
+    if age_seconds >= threshold_seconds * 6:
+        severity = "critical"
+    elif age_seconds >= threshold_seconds * 2:
+        severity = "error"
+    else:
+        severity = "warning"
+    actions = [
+        DiagnosticAction(
+            kind="reassign",
+            label="Assign to a worker profile",
+            payload={},
+            suggested=True,
+        ),
+        DiagnosticAction(
+            kind="cli_hint",
+            label="Check dispatcher status",
+            payload={"command": "hermes kanban diagnostics"},
+        ),
+    ]
+    return [Diagnostic(
+        kind="stuck_in_ready_unassigned",
+        severity=severity,
+        title=f"Unassigned ready for {age_str}",
+        detail=(
+            f"This task has been ready (unassigned) for {age_str} and the "
+            f"dispatcher silently skips it on every tick. Assign an "
+            f"assignee (or archive/delete if stale) so a worker can claim it."
+        ),
+        actions=actions,
+        first_seen_at=last_ready_ts,
+        last_seen_at=last_ready_ts,
+        count=1,
+        data={
+            "ready_since": last_ready_ts,
+            "age_seconds": int(age_seconds),
+            "threshold_seconds": int(threshold_seconds),
+        },
+    )]
+
+
 # Registry — order matters: rules higher on the list render first when
 # severity ties. Add new rules here.
 _RULES: list[RuleFn] = [
@@ -1090,6 +1169,7 @@ _RULES: list[RuleFn] = [
     _rule_stuck_in_blocked,
     _rule_block_unblock_cycling,
     _rule_stranded_in_ready,
+    _rule_stuck_in_ready_unassigned,
 ]
 
 

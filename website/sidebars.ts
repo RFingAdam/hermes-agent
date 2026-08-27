@@ -380,6 +380,7 @@ const sidebars: SidebarsConfig = {
                   collapsed: true,
                   items: [
                     'user-guide/skills/optional/creative/creative-audiocraft-audio-generation',
+                    'user-guide/skills/optional/creative/creative-auteur',
                     'user-guide/skills/optional/creative/creative-baoyu-article-illustrator',
                     'user-guide/skills/optional/creative/creative-baoyu-comic',
                     'user-guide/skills/optional/creative/creative-concept-diagrams',
@@ -551,6 +552,7 @@ const sidebars: SidebarsConfig = {
                   collapsed: true,
                   items: [
                     'user-guide/skills/optional/productivity/productivity-canvas',
+                    'user-guide/skills/optional/productivity/productivity-discernment-nudge',
                     'user-guide/skills/optional/productivity/productivity-here-now',
                     'user-guide/skills/optional/productivity/productivity-memento-flashcards',
                     'user-guide/skills/optional/productivity/productivity-shop',
@@ -790,6 +792,7 @@ const sidebars: SidebarsConfig = {
                 'developer-guide/video-gen-provider-plugin',
                 'developer-guide/web-search-provider-plugin',
                 'developer-guide/browser-provider-plugin',
+                'developer-guide/terminal-environment-plugin',
               ],
             },
             'developer-guide/creating-skills',

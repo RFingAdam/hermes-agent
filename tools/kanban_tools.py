@@ -251,6 +251,28 @@ def _goal_judge_available() -> bool:
     return client is not None and bool(model)
 
 
+def _project_pr_evidence_rejection(conn, task) -> Optional[str]:
+    """Require GitHub PR evidence before completing a project-linked task.
+
+    Local addition (not upstream), mirrors hermes_cli/kanban.py -- see that
+    copy for the full rationale. Only applies when ``project_id`` is set.
+    """
+    if task is None or not getattr(task, "project_id", None):
+        return None
+    from hermes_cli import kanban_db as _kb
+    for c in conn.execute(
+        "SELECT body FROM task_comments WHERE task_id = ?",
+        (task.id,),
+    ).fetchall():
+        if c["body"] and _kb._RESPAWN_GUARD_PR_URL_RE.search(c["body"]):
+            return None
+    return (
+        "task has project_id set (linked to a repo) but no GitHub PR URL "
+        "was found in any comment. Post the PR link before completing, or "
+        "if this task genuinely shipped no code, clear its project_id first."
+    )
+
+
 def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
     """Return a rejection reason when a goal-mode terminal handoff is premature."""
     if not task or not task.goal_mode or not _goal_judge_available():
@@ -765,6 +787,12 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and keep this task alive."
                 )
 
+            pr_rejection = _project_pr_evidence_rejection(conn, task)
+            if pr_rejection is not None:
+                return tool_error(
+                    f"Completion rejected: {pr_rejection}"
+                )
+
             try:
                 ok = kb.complete_task(
                     conn, tid,
@@ -800,6 +828,45 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
             if not ok:
+                # complete_task() returns False for several distinct
+                # reasons that all look identical from the caller's side
+                # (a plain bool). Distinguish the "unmet parent" case —
+                # it is the one that reliably fools a worker into
+                # thinking the dispatcher/DB is broken, because
+                # kanban_show simultaneously reports status=running with
+                # a matching run_id right up until the completion write
+                # is attempted. Root-caused 2026-08-18 on t_f7fa01b0: a
+                # parent link (mcp__kanban_link / dashboard) was added
+                # to this task's task_links row *after* it had already
+                # been claimed and started running, so _parents_satisfied()
+                # silently vetoes complete_task() even though nothing about
+                # the task's own run state ever changed. See kanban board
+                # ops t_3bd77dee for the incident writeup.
+                if not kb._parents_satisfied(conn, tid):
+                    unmet = conn.execute(
+                        "SELECT p.id, p.status FROM task_links l "
+                        "JOIN tasks p ON p.id = l.parent_id "
+                        "WHERE l.child_id = ? "
+                        "AND p.status NOT IN ('done', 'archived')",
+                        (tid,),
+                    ).fetchall()
+                    unmet_desc = ", ".join(
+                        f"{r['id']} ({r['status']})" for r in unmet
+                    ) or "unknown"
+                    return tool_error(
+                        f"kanban_complete blocked: {tid} has unmet parent "
+                        f"dependencies that are not done/archived yet: "
+                        f"{unmet_desc}. This is NOT a dispatcher/DB bug — a "
+                        f"parent-child link was added (possibly after your "
+                        f"run already started) and the completion gate "
+                        f"enforces 'all parents done' unconditionally. Your "
+                        f"work is NOT lost: the task is still 'running' and "
+                        f"the run is untouched. Options: (1) wait for the "
+                        f"listed parent(s) to reach done, then retry "
+                        f"kanban_complete with the same handoff; (2) if the "
+                        f"link looks wrong, comment here and mcp__kanban_block"
+                        f"(kind='dependency') so a human can review/unlink it."
+                    )
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )

@@ -130,7 +130,15 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
         if (method === 'session.resume') {
           const session = resolveSession(params.profile, params.session_id)
           if (!session) {
-            throw new Error(`session not found: ${params.session_id}`)
+            // Shaped like the real gateway's JsonRpcGatewayError (a `.code`
+            // property, per apps/shared/src/json-rpc-gateway.ts) so
+            // ensureGroupChatSession's fail-closed `.code !== 4007` check
+            // exercises the same branch production sees. 4007 mirrors
+            // session.resume's own "session not found" JSON-RPC error code
+            // (tui_gateway/methods_session.py).
+            const err = new Error(`session not found: ${params.session_id}`)
+            err.code = 4007
+            throw err
           }
           const profile = params.profile
           const seen = (resumeCallCounts.get(profile) || 0) + 1
@@ -196,7 +204,7 @@ function load(turnScript, { busyUntilResumeCall, clarifyUntilResumeCall, approva
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
-      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, GROUP_CHAT_MAX_ROUNDS, GROUP_CHAT_MAX_MESSAGES };\n'
+      '\nglobalThis.__gc = { sendToGroupChat, runGroupChatRounds, harvestStrandedGroupReply, resolveGroupResponders, parseGroupChatMentions, rotateGroupSpeakers, isGroupPassText, formatGroupChatLine, groupSpeakerLabel, buildGroupChatTurnPrompt, trimGroupChatLog, groupChatSyncSnapshot, groupChatGatewayJsonSize, mergeGroupChatSyncSnapshots, mergeRemoteGroupChatSnapshotIntoRooms, scheduleGroupChatServerSync, disbandGroupChat, renameGroupChat, updateGroupChat, durableGroupChatRooms, persistGroupChatRooms, ensureGroupChatSession, uniqueGroupChatName, liveGroupChatNames, groupChatNames, openGroupChat, closeGroupChatMainTab, shouldRenderGroupChatInPane, syncGroupClarify, clearGroupClarify, answerGroupClarify, $groupClarify, $groupChats, $groupNeedsYou, $groupChatWorkspace, $groupMainTabsRev, $botMeta, $lastRoster, GROUP_CHAT_STOCK_MAX_ROUNDS, GROUP_CHAT_STOCK_MAX_MESSAGES, GROUP_CHAT_EXTENDED_MAX_ROUNDS, GROUP_CHAT_EXTENDED_MAX_MESSAGES, GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, $groupChatExtendedMode, setGroupChatExtendedMode, applyGroupChatExtendedOverride, getGroupChatCeilings, groupTurnIntent, setGroupChatWorkLoop, groupTokenBudget, estimateGroupTokens, groupStatusCounts, setGroupMemberStatus, setGroupThreadAssignee, groupThreadAssignee, openGroupWorkClaims, hasOpenGroupWorkClaims, GROUP_WORK_NO_PROGRESS_LIMIT, GROUP_WORK_HARD_TURN_BACKSTOP, GROUP_CHAT_MODE_PRESETS, GROUP_CHAT_ROOM_MODES, getModeCeilings, setGroupChatRoomMode, normalizeGroupChatRoomMode, summarizeGroupChat };\n'
     )
   vm.runInNewContext(source, context, { filename: 'plugin.js' })
   const storageWrites = new Map()
@@ -293,7 +301,147 @@ test('hard caps: chatty members stop at GROUP_CHAT_MAX_MESSAGES total', async ()
   }
 
   const memberMessages = roomLog(gc, 'Loud').filter(e => e.from.kind === 'member')
-  assert.ok(memberMessages.length <= gc.GROUP_CHAT_MAX_MESSAGES, `posted ${memberMessages.length}`)
+  assert.ok(memberMessages.length <= gc.getGroupChatCeilings().maxMessages, `posted ${memberMessages.length}`)
+})
+
+test('fork change: default (stock) ceilings are byte-identical to upstream — extended mode is OFF by default', () => {
+  const gc = load(() => '(pass)')
+  const ceilings = gc.getGroupChatCeilings()
+  assert.equal(gc.$groupChatExtendedMode.get(), false)
+  assert.equal(ceilings.maxRounds, 3)
+  assert.equal(ceilings.maxMessages, 10)
+  assert.equal(ceilings.wallClockMs, null, 'stock mode has no wall-clock cap, matching upstream')
+})
+
+test('fork change: enabling extended mode raises ceilings and adds a wall-clock cap; disabling restores exact stock', () => {
+  const gc = load(() => '(pass)')
+
+  gc.setGroupChatExtendedMode(true)
+  const extended = gc.getGroupChatCeilings()
+  assert.equal(extended.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS)
+  assert.equal(extended.maxMessages, gc.GROUP_CHAT_EXTENDED_MAX_MESSAGES)
+  assert.equal(extended.wallClockMs, gc.GROUP_CHAT_EXTENDED_WALL_CLOCK_MS)
+  assert.ok(extended.maxRounds > 3 && extended.maxMessages > 10)
+
+  gc.setGroupChatExtendedMode(false)
+  const stock = gc.getGroupChatCeilings()
+  assert.equal(stock.maxRounds, 3)
+  assert.equal(stock.maxMessages, 10)
+  assert.equal(stock.wallClockMs, null)
+})
+
+test('fork change: extended-mode override clamps to hard ranges and rejects malformed input field-by-field', () => {
+  const gc = load(() => '(pass)')
+  gc.setGroupChatExtendedMode(true)
+
+  gc.applyGroupChatExtendedOverride({ maxRounds: 50, maxMessages: 300, wallClockMinutes: 10 })
+  let c = gc.getGroupChatCeilings()
+  assert.equal(c.maxRounds, 50)
+  assert.equal(c.maxMessages, 300)
+  assert.equal(c.wallClockMs, 10 * 60 * 1000)
+
+  // Out-of-range values are dropped per-field, falling back to the safe
+  // EXTENDED_* default for that field rather than clamping to a boundary.
+  // Covers both directions: too high (99999) AND below the 1000ms floor
+  // (e.g. 20ms) are equally rejected, not silently clamped up to the floor —
+  // a caller that means "as fast as possible" does not get a surprise
+  // near-instant deadline.
+  gc.applyGroupChatExtendedOverride({ maxRounds: 0, maxMessages: 99999, wallClockMinutes: 999 })
+  c = gc.getGroupChatCeilings()
+  assert.equal(c.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS)
+  assert.equal(c.maxMessages, gc.GROUP_CHAT_EXTENDED_MAX_MESSAGES)
+  assert.equal(c.wallClockMs, gc.GROUP_CHAT_EXTENDED_WALL_CLOCK_MS)
+
+  gc.applyGroupChatExtendedOverride({ wallClockMs: 20 }) // below the 1000ms floor
+  c = gc.getGroupChatCeilings()
+  assert.equal(c.wallClockMs, gc.GROUP_CHAT_EXTENDED_WALL_CLOCK_MS, 'below-floor value rejected, not clamped up to the floor')
+
+  // Malformed shapes never throw and never touch prior valid state.
+  gc.applyGroupChatExtendedOverride({ maxRounds: 20, maxMessages: 50, wallClockMinutes: 5 })
+  gc.applyGroupChatExtendedOverride(null)
+  c = gc.getGroupChatCeilings()
+  assert.equal(c.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS, 'null override resets to extended defaults, not a throw')
+
+  gc.applyGroupChatExtendedOverride({ maxRounds: 20, maxMessages: 50, wallClockMinutes: 5 })
+  gc.applyGroupChatExtendedOverride('nonsense')
+  c = gc.getGroupChatCeilings()
+  assert.equal(c.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS)
+
+  // An override set while extended mode is OFF has zero effect until it's
+  // turned back on — flipping off always means exact stock, full stop.
+  gc.setGroupChatExtendedMode(false)
+  gc.applyGroupChatExtendedOverride({ maxRounds: 99 })
+  c = gc.getGroupChatCeilings()
+  assert.equal(c.maxRounds, 3)
+  assert.equal(c.wallClockMs, null)
+})
+
+test('fork change: a tuned-down extended-mode maxMessages cap is actually enforced by the loop', async () => {
+  const gc = load((profile, prompt, n) => `message ${n} — @everyone keep going`)
+  gc.setGroupChatExtendedMode(true)
+  gc.applyGroupChatExtendedOverride({ maxRounds: 24, maxMessages: 2 })
+
+  gc.sendToGroupChat('Capped', MEMBERS, 'go wild but capped')
+  for (let i = 0; i < 400 && (gc.$groupChats.get().Capped || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  const memberMessages = roomLog(gc, 'Capped').filter(e => e.from.kind === 'member')
+  assert.ok(memberMessages.length <= 2, `posted ${memberMessages.length}, expected <= 2`)
+})
+
+test('fork change: extended-mode wall-clock cap ends the drive early even when nobody settles via all-pass', async () => {
+  // Every turn takes 300ms of REAL async work (a genuine setTimeout in the
+  // outer Node context — turnScript runs outside the vm sandbox, so this is
+  // real wall-clock time, not the vm's synchronous setTimeout mock) before
+  // replying with fresh (non-pass) text — simulates a room that keeps
+  // producing real-looking output and never naturally settles via the
+  // all-pass exit. Round/message ceilings are set high enough that ONLY the
+  // wall-clock deadline can be what stops this drive. wallClockMs is set to
+  // the minimum allowed (1000ms, the hard floor in applyGroupChatExtendedOverride)
+  // so real turn latency (300ms x up to 3 members/round) crosses it within a
+  // couple of rounds.
+  const gc = load(async (profile, prompt, n) => {
+    await new Promise(resolve => setTimeout(resolve, 300))
+    return `still working, turn ${n} — @everyone`
+  })
+  gc.setGroupChatExtendedMode(true)
+  gc.applyGroupChatExtendedOverride({ maxRounds: 100, maxMessages: 500, wallClockMs: 1000 })
+  const before = Date.now()
+
+  gc.sendToGroupChat('Marathon', MEMBERS, 'keep at it')
+  for (let i = 0; i < 100 && (gc.$groupChats.get().Marathon || {}).running; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+
+  const elapsed = Date.now() - before
+  assert.equal((gc.$groupChats.get().Marathon || {}).running, false, 'drive stopped')
+  // At ~300ms/turn x 3 members/round, the 1000ms deadline should stop this
+  // within 2 rounds (well under the 100-round/500-message ceilings).
+  const memberMessages = roomLog(gc, 'Marathon').filter(e => e.from.kind === 'member')
+  assert.ok(memberMessages.length < 100 * MEMBERS.length, `expected an early stop, posted ${memberMessages.length}`)
+  assert.ok(elapsed < 5000, `expected the deadline to end this quickly, took ${elapsed}ms`)
+})
+
+test('fork change: stock mode never applies a wall-clock cap, even with an extended-mode override staged', async () => {
+  // A staged override only ever takes effect once extended mode is actually
+  // on (per the earlier "flip off restores exact stock" test) — this proves
+  // the same thing from the loop's perspective: a room run under stock mode
+  // never terminates early via a wall-clock check it doesn't have, even
+  // when a (valid, non-clamped-away) override sits staged in storage.
+  const gc = load((profile, prompt, n) => `message ${n} — @everyone keep going`)
+  gc.applyGroupChatExtendedOverride({ wallClockMs: 1000 }) // valid value, would fire in ~1s if wrongly honored
+  // extended mode intentionally left OFF (the default)
+
+  gc.sendToGroupChat('StockOnly', MEMBERS, 'go')
+  for (let i = 0; i < 400 && (gc.$groupChats.get().StockOnly || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  const memberMessages = roomLog(gc, 'StockOnly').filter(e => e.from.kind === 'member')
+  // Stopped by the STOCK maxMessages=10 cap (near-instant, no real per-turn
+  // delay in this test's turnScript), not the staged 1000ms deadline.
+  assert.ok(memberMessages.length <= 10, `posted ${memberMessages.length}`)
 })
 
 test('failed member turn is a pass, not a room error', async () => {
@@ -422,6 +570,71 @@ test('recreating a same-name group after disband mints fresh member sessions', a
   assert.notEqual(first.stored, second.stored, 'the recreated room must not resume the old member session')
   assert.equal(gc.sessions.get(first.stored).title, 'Group: r-one')
   assert.equal(gc.sessions.get(second.stored).title, 'Group: r-two')
+})
+
+test('a transient resume failure fails closed instead of forking the member session', async () => {
+  // Mirrors findExistingCanonicalChat's fix (87b645f52c): a resume that
+  // fails for any reason OTHER than "genuinely doesn't exist" (JSON-RPC
+  // code 4007) must surface, not be read as "no session, mint a new one" —
+  // that would fork the member's real history and silently overwrite
+  // room.sessions[key] so the old session becomes unreachable.
+  const gc = load(() => '(pass)')
+  const member = { name: 'research', title: '' }
+
+  gc.updateGroupChat('Alpha', r => {
+    r.roomId = 'r-one'
+    return r
+  })
+  const first = await gc.ensureGroupChatSession('Alpha', member)
+  const roomBefore = gc.$groupChats.get().Alpha
+
+  // Simulate a transient failure (backend still warming up after a restart,
+  // a network blip on a cross-connection lookup, ...) on the NEXT resume of
+  // the member's own stored session — a real gateway error, not "not found".
+  const originalRequest = gc.host.request
+  gc.host.request = async (method, params) => {
+    if (method === 'session.resume' && params.session_id === first.stored) {
+      const err = new Error('gateway temporarily unavailable')
+      err.code = 5000
+      throw err
+    }
+    return originalRequest(method, params)
+  }
+
+  await assert.rejects(
+    () => gc.ensureGroupChatSession('Alpha', member),
+    /Could not check .*group session/
+  )
+
+  gc.host.request = originalRequest
+
+  // Nothing was forked: the room's session pointer is untouched, and the
+  // original session is still the only one on record for this member.
+  assert.deepEqual(gc.$groupChats.get().Alpha.sessions, roomBefore.sessions)
+  assert.equal(gc.sessions.size, 1)
+})
+
+test('a genuinely nonexistent stored session (4007) still falls through to the title lookup, then create', async () => {
+  const gc = load(() => '(pass)')
+  const member = { name: 'research', title: '' }
+
+  gc.updateGroupChat('Alpha', r => {
+    r.roomId = 'r-one'
+    return r
+  })
+
+  // A stored sid pointing at a session the gateway no longer has (e.g. an
+  // out-of-band deletion) is a genuine 4007 on the first target — the loop
+  // must still try the title lookup and, finding nothing there either,
+  // create a fresh session rather than throwing.
+  gc.updateGroupChat('Alpha', r => {
+    r.sessions = { research: 'sid-gone' }
+    return r
+  })
+
+  const result = await gc.ensureGroupChatSession('Alpha', member)
+  assert.ok(result.stored, 'a fresh session must be minted when nothing resumable exists')
+  assert.notEqual(result.stored, 'sid-gone')
 })
 
 test('group session titles are pinned to the roomId, with a legacy fallback to the display name', async () => {
@@ -1148,7 +1361,7 @@ test('closing an older selected group does not clear the newer selection', () =>
 })
 
 test('source contract: active group styling suppresses bot styling', () => {
-  assert.match(pluginSource, /const isActive = !activeGroup && !bot\.remoteSource && bot\.name === focusedProfile/)
+  assert.match(pluginSource, /function botRowOwnsWorkspace\([\s\S]*?if \(activeGroup\) \{\s*return false/)
   assert.match(pluginSource, /active && 'bg-\(--ui-row-active-background\)'/)
   assert.match(pluginSource, /active: groupChatName === row\.name/)
 })
@@ -1209,6 +1422,59 @@ test('disband: removes only this membership, room log, workspace, and needs-you 
   assert.equal(durable.Keep.members[0].connectionId, 'remote-1')
 })
 
+test('disband: an empty rendered roster cannot leave a metadata-only group row', async () => {
+  const gc = load(() => '(pass)')
+
+  gc.$botMeta.set({ builder: { groups: ['Remote'], group: 'Remote' } })
+  gc.$groupChats.set({
+    Remote: { log: [], members: [], watermarks: {}, sessions: {}, running: false }
+  })
+
+  await gc.disbandGroupChat('Remote', [])
+
+  assert.equal(gc.$groupChats.get().Remote, undefined, 'room record is deleted')
+  assert.equal(JSON.stringify(gc.$botMeta.get().builder.groups), JSON.stringify([]))
+  assert.equal(gc.$botMeta.get().builder.group, null)
+  assert.equal(
+    JSON.stringify(gc.groupChatNames(gc.$botMeta.get(), gc.$groupChats.get())),
+    JSON.stringify([]),
+    'stale bot metadata cannot reconstruct a deleted zero-member row'
+  )
+})
+
+test('disband: an empty rendered roster recovers the exact source-qualified metadata owner', async () => {
+  const gc = load(() => '(pass)')
+  const remote = {
+    name: 'builder',
+    connectionId: 'remote-1',
+    connectionKind: 'remote',
+    sourceScoped: true,
+    remoteSource: true,
+    route: {
+      connectionId: 'remote-1',
+      mode: 'remote',
+      profile: 'builder',
+      targetProfile: 'builder'
+    }
+  }
+
+  gc.$lastRoster.set([remote])
+  gc.$botMeta.set({
+    builder: { groups: ['Keep'], group: 'Keep' },
+    'remote-1::builder': { groups: ['Remote'], group: 'Remote' }
+  })
+  gc.$groupChats.set({
+    Remote: { log: [], members: [], watermarks: {}, sessions: {}, running: false }
+  })
+
+  await gc.disbandGroupChat('Remote', [])
+
+  assert.equal(JSON.stringify(gc.$botMeta.get()['remote-1::builder'].groups), JSON.stringify([]))
+  assert.equal(gc.$botMeta.get()['remote-1::builder'].group, null)
+  assert.equal(JSON.stringify(gc.$botMeta.get().builder.groups), JSON.stringify(['Keep']))
+  assert.equal(gc.$botMeta.get().builder.group, 'Keep', 'same-named local metadata is untouched')
+})
+
 test('disband: skips source-qualified remote members instead of mutating same-named local metadata', async () => {
   const gc = load(() => '(pass)')
   gc.$botMeta.set({ builder: { groups: ['Keep'], group: 'Keep' } })
@@ -1261,10 +1527,10 @@ test('disband: a running room leaves an epoch-bumped empty tombstone so in-fligh
     'disbanded name is immediately reusable — tombstone does not hold it')
 })
 
-test('source contract: workspace header offers disband behind a ConfirmDialog', () => {
+test('source contract: workspace deletion stays behind a ConfirmDialog', () => {
   assert.match(pluginSource, /function disbandGroupChat\(/)
-  assert.match(pluginSource, /Disband group chat\?/)
-  assert.match(pluginSource, /title: `Disband the \$\{group\} group chat`/)
+  assert.match(pluginSource, /title: 'Delete group chat\?'/)
+  assert.match(pluginSource, /await disbandGroupChat\(deletingGroup\.name, deletingGroup\.members\)/)
 })
 
 test('default profile speaks as Hermes in room transcripts, not @default', () => {
@@ -1278,6 +1544,43 @@ test('default profile speaks as Hermes in room transcripts, not @default', () =>
   assert.equal(you, 'Hermes (you): hi')
   const plain = gc.formatGroupChatLine({ from: { kind: 'member', name: 'builder' }, text: 'yo' }, 'research')
   assert.equal(plain, 'builder: yo')
+})
+
+test('speaker labels honor friendly identity: Bot Mode title, then display_name, never a stale Hermes', () => {
+  const gc = load(() => '(pass)')
+
+  // A renamed default (core display_name via `hermes profile rename`) must
+  // read as its new name — the community report was "Lucy" still showing
+  // "Hermes is thinking…" in group rooms.
+  gc.$lastRoster.set([{ name: 'default', display_name: 'Lucy' }])
+  assert.equal(gc.groupSpeakerLabel('default'), 'Lucy')
+  assert.equal(
+    gc.formatGroupChatLine({ from: { kind: 'member', name: 'default' }, text: 'hi' }, 'builder'),
+    'Lucy: hi'
+  )
+
+  // A Bot Mode title outranks display_name (same precedence as displayName).
+  gc.$botMeta.set({ default: { title: 'Moxie' } })
+  assert.equal(gc.groupSpeakerLabel('default'), 'Moxie')
+
+  // Secondary profiles get their title too — the thinking line names the
+  // renamed bot, not the raw profile slug.
+  gc.$botMeta.set({ research: { title: 'Radar' } })
+  gc.$lastRoster.set([])
+  assert.equal(gc.groupSpeakerLabel('research'), 'Radar')
+
+  // Untitled rows keep today's behavior: default → Hermes, others verbatim.
+  gc.$botMeta.set({})
+  assert.equal(gc.groupSpeakerLabel('default'), 'Hermes')
+  assert.equal(gc.groupSpeakerLabel('builder'), 'builder')
+})
+
+test('speaker labels never borrow a remote row\u2019s display_name for a local speaker', () => {
+  const gc = load(() => '(pass)')
+  // Only a remote/thin row named default exists — its display_name belongs
+  // to that connection, not to the active gateway's default.
+  gc.$lastRoster.set([{ name: 'default', display_name: 'HomelabBot', remoteSource: true }])
+  assert.equal(gc.groupSpeakerLabel('default'), 'Hermes')
 })
 
 test('turn prompt addresses the default profile as @hermes', () => {
@@ -1328,9 +1631,10 @@ test('source contract: room messages carry the speaker avatar via the roster app
   assert.match(workspace, /image && !isBackfilledFacePng\(image\)/)
   assert.match(workspace, /jsx\(BotFace, \{\s*shape,\s*color,\s*image: photo \? image : null,\s*size: 24,\s*name: entry\.from\.name/)
 
-  // Header shows the member faces (capped) with a names tooltip.
-  assert.match(workspace, /members\.slice\(0, 6\)\.map\(/)
-  assert.match(workspace, /title: members\.map\(b => displayName\(b, botRosterMeta\(b, allMeta\)\)\)\.join\(', '\)/)
+  // Header stays quiet: member avatars belong to messages, while the header
+  // exposes a concise count instead of an overlapping face stack.
+  assert.doesNotMatch(workspace, /members\.slice\(0, 6\)\.map\(/)
+  assert.match(workspace, /children: members\.length > 0 && availableMembers < members\.length \? availabilityLabel : `\$\{members\.length\} bots`/)
 })
 
 test('stranded harvest: a timed-out turn whose reply landed late posts into the room and clears the marker', async () => {
@@ -1899,4 +2203,344 @@ test('remote-merge reachability: a disband tombstone that survives a merge (gate
 
   const durable = gc.storageWrites.get('group-chats')
   assert.ok(durable && !('Live' in durable), 'merged tombstone must not resurrect as a persisted room')
+})
+
+test('fork change: unset room mode keeps exact stock/extended global-toggle behavior', () => {
+  const gc = load(() => '(pass)')
+  // No room record / no mode → stock defaults, same as pre-mode behavior.
+  let c = gc.getGroupChatCeilings('UnsetRoom', MEMBERS)
+  assert.equal(c.mode, null)
+  assert.equal(c.maxRounds, 3)
+  assert.equal(c.maxMessages, 10)
+  assert.equal(c.wallClockMs, null)
+  assert.equal(c.autoSummary, false)
+  assert.equal(c.toolCapable, true)
+
+  gc.setGroupChatExtendedMode(true)
+  c = gc.getGroupChatCeilings('UnsetRoom', MEMBERS)
+  assert.equal(c.mode, null)
+  assert.equal(c.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS)
+  assert.equal(c.maxMessages, gc.GROUP_CHAT_EXTENDED_MAX_MESSAGES)
+  assert.equal(c.wallClockMs, gc.GROUP_CHAT_EXTENDED_WALL_CLOCK_MS)
+})
+
+test('fork change: per-room mode overrides the global extended toggle', () => {
+  const gc = load(() => '(pass)')
+  gc.setGroupChatExtendedMode(true)
+  gc.setGroupChatRoomMode('DecideRoom', 'decide')
+
+  const c = gc.getGroupChatCeilings('DecideRoom', MEMBERS)
+  assert.equal(c.mode, 'decide')
+  assert.equal(c.maxRounds, gc.GROUP_CHAT_MODE_PRESETS.decide.maxRounds)
+  assert.equal(c.autoSummary, true)
+  assert.equal(c.toolCapable, false)
+  // Mode wins over extended ceilings.
+  assert.notEqual(c.maxRounds, gc.GROUP_CHAT_EXTENDED_MAX_ROUNDS)
+})
+
+test('fork change: message cap scales with member count so large rooms finish their round budget', () => {
+  const gc = load(() => '(pass)')
+  const two = [{ name: 'a' }, { name: 'b' }]
+  const six = [{ name: 'a' }, { name: 'b' }, { name: 'c' }, { name: 'd' }, { name: 'e' }, { name: 'f' }]
+
+  gc.setGroupChatRoomMode('Two', 'build')
+  gc.setGroupChatRoomMode('Six', 'build')
+
+  const c2 = gc.getGroupChatCeilings('Two', two)
+  const c6 = gc.getGroupChatCeilings('Six', six)
+  assert.equal(c2.maxRounds, c6.maxRounds, 'round cap is mode-level, not size-level')
+  assert.ok(c6.maxMessages > c2.maxMessages, `6-member budget ${c6.maxMessages} should exceed 2-member ${c2.maxMessages}`)
+  // Exactly messagesPerMemberPerRound * members * rounds
+  const per = gc.GROUP_CHAT_MODE_PRESETS.build.messagesPerMemberPerRound
+  assert.equal(c2.maxMessages, per * 2 * c2.maxRounds)
+  assert.equal(c6.maxMessages, per * 6 * c6.maxRounds)
+  // A 5-bot stock room used to die at 10 messages (~2 rounds). Build mode
+  // for 5 bots must leave headroom past full-round participation.
+  const five = [{ name: 'a' }, { name: 'b' }, { name: 'c' }, { name: 'd' }, { name: 'e' }]
+  gc.setGroupChatRoomMode('Five', 'build')
+  const c5 = gc.getGroupChatCeilings('Five', five)
+  assert.ok(c5.maxMessages >= 5 * c5.maxRounds, `5-bot build budget ${c5.maxMessages} must cover full round participation`)
+})
+
+test('fork change: invalid room mode is dropped and falls back to global toggle', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Bad', r => {
+    r.mode = 'not-a-real-mode'
+    r.log = r.log || []
+    return r
+  })
+  const c = gc.getGroupChatCeilings('Bad', MEMBERS)
+  assert.equal(c.mode, null)
+  assert.equal(c.maxRounds, 3)
+  assert.equal(gc.normalizeGroupChatRoomMode('BUILD'), 'build')
+  assert.equal(gc.normalizeGroupChatRoomMode(''), null)
+  assert.equal(gc.normalizeGroupChatRoomMode(42), null)
+})
+
+test('fork change: decide mode posts a system summary on message-cap exit', async () => {
+  // Multi-member chatty room: each round every member posts, so the scaled
+  // message ceiling is hit before natural all-pass settle. Solo rooms settle
+  // after one reply (no new delta next round) and never reach a hard cap.
+  const gc = load((profile, prompt, n) => `message ${n} from ${profile} — @everyone keep going`)
+  gc.setGroupChatRoomMode('DecideCap', 'decide')
+  const ceilings = gc.getGroupChatCeilings('DecideCap', MEMBERS)
+  assert.equal(ceilings.mode, 'decide')
+  assert.equal(ceilings.autoSummary, true)
+  assert.ok(ceilings.maxMessages >= MEMBERS.length * 2)
+
+  gc.sendToGroupChat('DecideCap', MEMBERS, 'make a call @everyone')
+  for (let i = 0; i < 800 && (gc.$groupChats.get().DecideCap || {}).running; i++) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal((gc.$groupChats.get().DecideCap || {}).running, false, 'drive must finish')
+
+  const log = roomLog(gc, 'DecideCap')
+  const memberMsgs = log.filter(e => e.from && e.from.kind === 'member')
+  const system = log.filter(e => e.from && e.from.kind === 'system')
+  assert.ok(memberMsgs.length > 0, 'expected member traffic before the cap')
+  assert.ok(system.length >= 1, `expected a decide-mode system summary, kinds=${log.map(e => e.from.kind).join(',')}`)
+  assert.match(system[system.length - 1].text, /Decide-mode room summary/)
+  assert.match(system[system.length - 1].text, /No kanban card created/)
+})
+
+test('fork change: decide/standing prompts mark the room chat-only; build does not', () => {
+  const gc = load(() => '(pass)')
+  const members = MEMBERS
+  const viewer = members[0]
+  const decidePrompt = gc.buildGroupChatTurnPrompt({
+    groupName: 'D', members, viewer, deltaLines: ['User (user): hi'], toolCapable: false
+  })
+  const buildPrompt = gc.buildGroupChatTurnPrompt({
+    groupName: 'B', members, viewer, deltaLines: ['User (user): hi'], toolCapable: true
+  })
+  assert.match(decidePrompt, /chat-only/)
+  assert.doesNotMatch(buildPrompt, /chat-only/)
+})
+
+test('fork change: room mode persists through updateGroupChat durable map', () => {
+  const gc = load(() => '(pass)')
+  gc.setGroupChatRoomMode('PersistMe', 'standing')
+  assert.equal(gc.$groupChats.get().PersistMe.mode, 'standing')
+  const written = gc.storageWrites.get('group-chats')
+  assert.ok(written, 'expected group-chats storage write')
+  assert.equal(written.PersistMe.mode, 'standing')
+
+  gc.setGroupChatRoomMode('PersistMe', null)
+  assert.equal(gc.$groupChats.get().PersistMe.mode, undefined)
+  const cleared = gc.storageWrites.get('group-chats')
+  assert.equal(cleared.PersistMe.mode, undefined)
+})
+
+test('fork change: room header exposes a mode dropdown (settings surface)', () => {
+  assert.match(pluginSource, /setGroupChatRoomMode\(group, 'build'\)/)
+  assert.match(pluginSource, /setGroupChatRoomMode\(group, 'decide'\)/)
+  assert.match(pluginSource, /setGroupChatRoomMode\(group, 'standing'\)/)
+  assert.match(pluginSource, /'aria-label': `Room mode: \$\{modeLabel\}`/)
+})
+
+// --- fork change: autonomous work loop -------------------------------------
+
+test('fork change: groupTurnIntent classifies the work-loop sentinels', () => {
+  const gc = load(() => '(pass)')
+  assert.equal(gc.groupTurnIntent('(pass)'), 'pass')
+  assert.equal(gc.groupTurnIntent(''), 'pass')
+  assert.equal(gc.groupTurnIntent('pulled the branch\n(working)'), 'working')
+  assert.equal(gc.groupTurnIntent('**Done** shipped it\n- Did: x\n(done)'), 'done')
+  assert.equal(gc.groupTurnIntent('cannot reach the box\n(blocked)'), 'blocked')
+  assert.equal(gc.groupTurnIntent('just a normal message'), 'reply')
+})
+
+test('fork change: a member holding a claim keeps the floor past the room round ceiling', async () => {
+  let n = 0
+  const gc = load(profile => {
+    if (profile !== 'builder') return '(pass)'
+    n += 1
+    return n <= 6 ? `step ${n} complete\n(working)` : '**Done** finished\n- Did: it\n- Next: none\n- Blockers: none\n(done)'
+  })
+  gc.updateGroupChat('Grind', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder take this on', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  await gc.runGroupChatRounds('Grind', [{ name: 'builder', title: '' }], 'legacy')
+
+  const builderTurns = gc.calls.filter(c => c.profile === 'builder').length
+  assert.ok(
+    builderTurns > gc.GROUP_CHAT_STOCK_MAX_ROUNDS,
+    `expected the claim to outlive the ${gc.GROUP_CHAT_STOCK_MAX_ROUNDS}-round ceiling, got ${builderTurns} turns`
+  )
+  assert.equal(gc.hasOpenGroupWorkClaims('Grind', 'legacy'), false, '(done) must release the claim')
+})
+
+test('fork change: repeating itself releases the claim and posts a blocked note', async () => {
+  const gc = load(profile => (profile === 'builder' ? 'still thinking about it\n(working)' : '(pass)'))
+  gc.updateGroupChat('Grind', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder go', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  await gc.runGroupChatRounds('Grind', [{ name: 'builder', title: '' }], 'legacy')
+
+  assert.equal(gc.hasOpenGroupWorkClaims('Grind', 'legacy'), false, 'a stalled member must not hold the claim')
+  const log = ($ => $.log || [])(gc.$groupChats.get().Grind || {})
+  assert.ok(
+    log.some(e => e.from?.kind === 'system' && /no new progress/i.test(e.text || '')),
+    'the room should say why the claim was released'
+  )
+})
+
+test('fork change: a room can opt out of the work loop', async () => {
+  let n = 0
+  const gc = load(profile => {
+    if (profile !== 'builder') return '(pass)'
+    n += 1
+    return `step ${n}\n(working)`
+  })
+  gc.updateGroupChat('Quiet', r => {
+    r.workLoop = false
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder go', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  assert.equal(gc.getGroupChatCeilings('Quiet', MEMBERS).workLoop, false)
+  await gc.runGroupChatRounds('Quiet', [{ name: 'builder', title: '' }], 'legacy')
+  assert.equal(gc.hasOpenGroupWorkClaims('Quiet', 'legacy'), false, 'an opted-out room never opens a claim')
+})
+
+test('fork change: the room header toggle flips the work loop and persists only when off', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Toggle', r => { r.log = []; return r })
+
+  assert.equal(gc.getGroupChatCeilings('Toggle', MEMBERS).workLoop, true, 'default is on')
+
+  gc.setGroupChatWorkLoop('Toggle', false)
+  assert.equal(gc.getGroupChatCeilings('Toggle', MEMBERS).workLoop, false)
+  assert.equal(gc.durableGroupChatRooms().Toggle.workLoop, false, 'off must survive a reload')
+
+  gc.setGroupChatWorkLoop('Toggle', true)
+  assert.equal(gc.getGroupChatCeilings('Toggle', MEMBERS).workLoop, true)
+  assert.ok(
+    !Object.prototype.hasOwnProperty.call(gc.durableGroupChatRooms().Toggle, 'workLoop'),
+    'on is the default, so it should not be persisted'
+  )
+})
+
+test('fork change: the estimated-token ceiling stops a drive and says so', async () => {
+  const long = 'x'.repeat(4000)
+  const gc = load(profile => (profile === 'builder' ? `${long}\n(working)` : '(pass)'))
+  gc.updateGroupChat('Spendy', r => {
+    r.tokenBudget = 2000
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder go', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  assert.equal(gc.groupTokenBudget('Spendy'), 2000)
+  await gc.runGroupChatRounds('Spendy', [{ name: 'builder', title: '' }], 'legacy')
+
+  const log = (gc.$groupChats.get().Spendy || {}).log || []
+  assert.ok(
+    log.some(e => e.from?.kind === 'system' && /Room stopped at .*ceiling/i.test(e.text || '')),
+    'the room should say it stopped on budget, with the ceiling'
+  )
+  assert.equal(gc.hasOpenGroupWorkClaims('Spendy', 'legacy'), false, 'claims release when the budget is hit')
+  const note = log.find(e => e.from?.kind === 'system' && /Room stopped at/i.test(e.text || ''))
+  // No backend usage in the harness, so the note must say it is an estimate
+  // rather than implying a billed figure.
+  assert.match(note.text, /character estimate/i)
+})
+
+test('fork change: a room with no explicit budget falls back to its mode preset', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Modey', r => { r.log = []; return r })
+  const dflt = gc.groupTokenBudget('Modey')
+  gc.setGroupChatRoomMode('Modey', 'decide')
+  assert.ok(gc.groupTokenBudget('Modey') < dflt, 'decide is tighter than the default')
+  assert.ok(gc.estimateGroupTokens('abcd') >= 1)
+})
+
+test('fork change: an assigned thread routes to the assignee, not the first mentioned', async () => {
+  const spoke = []
+  const gc = load(profile => { spoke.push(profile); return '(pass)' })
+  gc.updateGroupChat('Lanes', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder @research both look at this', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+  // research is second in the roster and second in the mention order: if the
+  // assignee is ignored, builder speaks instead and this fails.
+  gc.setGroupThreadAssignee('Lanes', 'legacy', 'research')
+  assert.equal(gc.groupThreadAssignee('Lanes', 'legacy'), 'research')
+
+  await gc.runGroupChatRounds('Lanes', [{ name: 'builder', title: '' }, { name: 'research', title: '' }], 'legacy')
+
+  assert.ok(spoke.includes('research'), 'the assignee works its lane')
+  assert.ok(!spoke.includes('builder'), 'a non-assignee must not work in someone else\'s lane')
+})
+
+test('fork change: clearing the assignee reopens the thread', async () => {
+  const spoke = []
+  const gc = load(profile => { spoke.push(profile); return '(pass)' })
+  gc.updateGroupChat('Lanes2', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@research over to you', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+  gc.setGroupThreadAssignee('Lanes2', 'legacy', 'builder')
+  gc.setGroupThreadAssignee('Lanes2', 'legacy', null)
+  assert.equal(gc.groupThreadAssignee('Lanes2', 'legacy'), null)
+
+  await gc.runGroupChatRounds('Lanes2', [{ name: 'builder', title: '' }, { name: 'research', title: '' }], 'legacy')
+  assert.ok(spoke.includes('research'), 'with no assignee the mentioned member answers again')
+})
+
+test('fork change: assignments survive a reload', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Lanes3', r => { r.log = []; return r })
+  gc.setGroupThreadAssignee('Lanes3', 'legacy', 'ops')
+  assert.equal(gc.durableGroupChatRooms().Lanes3.assignments.legacy, 'ops')
+})
+
+test('fork change: a finished turn reports itself as ready for review', async () => {
+  const gc = load(profile => (profile === 'builder'
+    ? '**Done** shipped it\n- Did: x\n- Next: none\n- Blockers: none\n(done)'
+    : '(pass)'))
+  gc.updateGroupChat('Status', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder go', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  await gc.runGroupChatRounds('Status', [{ name: 'builder', title: '' }], 'legacy')
+
+  assert.equal(gc.groupStatusCounts('Status').review, 1, 'a (done) turn is waiting on review')
+  assert.equal(gc.groupStatusCounts('Status').blocked, 0)
+})
+
+test('fork change: a blocked turn is counted apart from a finished one', async () => {
+  const gc = load(profile => (profile === 'builder'
+    ? '**Blocked** cannot reach QA\n- Blockers: 120 unreachable\n(blocked)'
+    : '(pass)'))
+  gc.updateGroupChat('Status2', r => {
+    r.log = [{ from: { kind: 'user', name: 'You' }, text: '@builder go', at: 1 }]
+    r.watermarks = {}
+    return r
+  })
+
+  await gc.runGroupChatRounds('Status2', [{ name: 'builder', title: '' }], 'legacy')
+
+  const counts = gc.groupStatusCounts('Status2')
+  assert.equal(counts.blocked, 1, 'blocked is its own state, not "done"')
+  assert.equal(counts.review, 0)
+})
+
+test('fork change: member status survives a reload', () => {
+  const gc = load(() => '(pass)')
+  gc.updateGroupChat('Status3', r => { r.log = []; return r })
+  gc.setGroupMemberStatus('Status3', 'ops', 'review', 'legacy')
+  assert.equal(gc.durableGroupChatRooms().Status3.memberStatus.ops.state, 'review')
+  assert.equal(gc.setGroupMemberStatus('Status3', 'ops', 'bogus', 'legacy'), null, 'unknown states are rejected')
 })

@@ -322,6 +322,72 @@ _JSON_FIELD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Python ``repr`` uses single-quoted mapping fields, so opaque credentials in
+# tracebacks and pytest failure introspection bypass the double-quoted JSON rule
+# above: ``{'BRAVE_API_KEY': 'opaque-value'}``. Capture identifier-shaped keys
+# here, then apply the canonical high-confidence key policy in the callback.
+_PYTHON_REPR_SECRET_KEYS = frozenset({
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "auth_token",
+    "token",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "secret",
+    "password",
+    "passwd",
+    "private_key",
+    "credential",
+    "credentials",
+    "authorization",
+    "bearer",
+    "secret_value",
+    "raw_secret",
+    "secret_input",
+    "key_material",
+})
+_PYTHON_REPR_ENV_SUFFIXES = (
+    "_API_KEY",
+    "_TOKEN",
+    "_SECRET",
+    "_PASSWORD",
+    "_PASSWD",
+    "_CREDENTIAL",
+    "_CREDENTIALS",
+)
+# Casefolded credential suffixes for mixed/camel-case key names
+# (``UserPassword``, ``sessionToken``, ``clientApiKey``). Suffix-only so
+# ``token_count`` / ``password_policy`` metadata keys never match. Widened per
+# OpenHands/software-agent-sdk#4508.
+_PYTHON_REPR_CREDENTIAL_SUFFIXES = (
+    "apikey",
+    "api_key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "credentials",
+)
+_PYTHON_REPR_FIELD_RE = re.compile(
+    r"'(?P<key>[A-Za-z_][A-Za-z0-9_]*)'(?P<sep>\s*:\s*)"
+    r"(?:"
+    r"(?P<single_prefix>[bB]?)'(?P<single_value>(?:\\.|[^'\\])+)'"
+    r"|(?P<double_prefix>[bB]?)\"(?P<double_value>(?:\\.|[^\"\\])+)\""
+    r")"
+)
+
+# Terminal/process output normally uses ``code_file=True`` to preserve source.
+# Add repr masking only to high-confidence diagnostic lines: pytest assertion
+# introspection (``E       ...``) and final Python exception lines.
+_PYTEST_DIAGNOSTIC_LINE_RE = re.compile(r"^(?P<prefix>[ \t]*E[ \t]{2,})(?P<body>.*)$")
+_PYTHON_EXCEPTION_LINE_RE = re.compile(
+    r"^(?P<prefix>(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*"
+    r"(?:Error|Exception|Warning):[ \t]*)(?P<body>.*)$"
+)
+
 # Authorization headers — any scheme (Bearer, Basic, Token, Digest, …) plus the
 # bare-credential form, and Proxy-Authorization. The credential token is masked
 # while the header name and scheme word are preserved for debuggability. The
@@ -609,6 +675,74 @@ def _mask_token(token: str) -> str:
     return mask_secret(token, head=6, tail=4, floor=18)
 
 
+def _is_python_repr_secret_key(key: str) -> bool:
+    """Return True for exact secret keys or credential-suffixed key names."""
+    folded = key.casefold()
+    if folded in _PYTHON_REPR_SECRET_KEYS:
+        return True
+    if key.isupper() and key.endswith(_PYTHON_REPR_ENV_SUFFIXES):
+        return True
+    # Mixed/camel-case keys ending in a credential word (``UserPassword``,
+    # ``sessionToken``, ``clientApiKey``) — the exact-set and uppercase-suffix
+    # rules above miss these. Suffix-only matching keeps metadata names like
+    # ``TOKEN_COUNT`` / ``PASSWORD_POLICY`` / ``SECRET_NAME`` untouched.
+    # Class widened per OpenHands/software-agent-sdk#4508 (their dict-entry
+    # redaction was uppercase-only and leaked mixed-case keys).
+    return folded.endswith(_PYTHON_REPR_CREDENTIAL_SUFFIXES)
+
+
+def _redact_python_repr_fields(text: str) -> str:
+    """Fully mask credential fields in Python mapping ``repr`` output."""
+    def _sub(match: re.Match) -> str:
+        key = match.group("key")
+        if not _is_python_repr_secret_key(key):
+            return match.group(0)
+
+        single_value = match.group("single_value")
+        if single_value is not None:
+            prefix = match.group("single_prefix") or ""
+            quote = "'"
+            value = single_value
+        else:
+            prefix = match.group("double_prefix") or ""
+            quote = '"'
+            value = match.group("double_value")
+
+        # Mapping repr can contain code-shaped fixture values too. Preserve
+        # programmatic env lookups just like the ENV/JSON/YAML passes do.
+        if _ENV_LOOKUP_VALUE_RE.match(value):
+            return match.group(0)
+        # Do not retain head/tail characters here: escaped repr atoms can cross
+        # a slicing boundary and leave an unescaped quote behind. A full mask is
+        # parseable for both str and bytes values and leaks no opaque bytes.
+        return f"'{key}'{match.group('sep')}{prefix}{quote}***{quote}"
+
+    return _PYTHON_REPR_FIELD_RE.sub(_sub, text)
+
+
+def _redact_python_diagnostic_repr_fields(text: str) -> str:
+    """Mask repr fields only on pytest/error lines in source-preserving output."""
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        ending = ""
+        body_line = line
+        if line.endswith("\r\n"):
+            body_line, ending = line[:-2], "\r\n"
+        elif line.endswith("\n") or line.endswith("\r"):
+            body_line, ending = line[:-1], line[-1:]
+
+        match = _PYTEST_DIAGNOSTIC_LINE_RE.match(body_line)
+        if match is None:
+            match = _PYTHON_EXCEPTION_LINE_RE.match(body_line)
+        if match is not None:
+            lines[index] = (
+                match.group("prefix")
+                + _redact_python_repr_fields(match.group("body"))
+                + ending
+            )
+    return "".join(lines)
+
+
 def _redact_query_string(query: str) -> str:
     """Redact sensitive parameter values in a URL query string.
 
@@ -791,7 +925,7 @@ def redact_sensitive_text(
     URL userinfo. The default remains False because actionable OAuth callback,
     magic-link, and pre-signed URLs must survive ordinary tool flows unchanged.
 
-    Set code_file=True to skip the ENV-assignment and JSON-field regex
+    Set code_file=True to skip the ENV-assignment, JSON-field, and Python-repr
     patterns when the text is known to be source code (e.g. MAX_TOKENS=***
     constants, "apiKey": "test" fixtures). Prefix patterns, auth headers,
     private keys, DB connstrings, JWTs, and URL secrets are still redacted.
@@ -896,6 +1030,12 @@ def redact_sensitive_text(
                     return m.group(0)
                 return f'{key}: "{_mask_token(value)}"'
             text = _JSON_FIELD_RE.sub(_redact_json, text)
+
+        # Python mapping repr fields: {'API_KEY': '***'}. This is a log /
+        # traceback shape, not ordinary source-code handling; terminal output
+        # from Python commands gets a narrowly scoped pass below.
+        if ":" in text and "'" in text:
+            text = _redact_python_repr_fields(text)
 
         # Unquoted YAML / colon config: password: ***  (after JSON so quoted
         # values are handled there; the lookahead in _YAML_ASSIGN_RE skips
@@ -1118,7 +1258,8 @@ def redact_terminal_output(
       ENV pass is the right one (keys whose names carry no secret keyword
       can still slip through it — same limit as the env-dump path).
     - anything else (or unknown command) → ``code_file=True`` to avoid
-      false positives on source/config dumps.
+      false positives on source/config dumps. High-confidence pytest diagnostic
+      and final exception lines still receive the Python-repr credential pass.
 
     ``force=True`` bypasses the global ``security.redact_secrets`` preference
     for safety boundaries that must never emit raw credentials.
@@ -1127,7 +1268,15 @@ def redact_terminal_output(
         return output
     cmd = command or ""
     code_file = not (is_env_dump_command(cmd) or _command_reads_env_file(cmd))
-    return redact_sensitive_text(output, force=force, code_file=code_file)
+    redacted = redact_sensitive_text(output, force=force, code_file=code_file)
+    if (
+        code_file
+        and (force or _REDACT_ENABLED)
+        and ":" in redacted
+        and "'" in redacted
+    ):
+        redacted = _redact_python_diagnostic_repr_fields(redacted)
+    return redacted
 
 
 # Substrings used to gate ``_PREFIX_RE`` execution. If none of these appear in

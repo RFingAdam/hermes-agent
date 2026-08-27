@@ -57,6 +57,8 @@ def _ns(**kw):
         ignore_existing=False,
         hermes_root=None,
         cwd=None,
+        setup_tcc_identity=False,
+        identity=None,
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)
@@ -490,6 +492,255 @@ def test_relaunchable_fixup_falls_back_to_legacy_adhoc_on_failure(tmp_path, monk
     assert ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(app)] in calls
 
 
+# --- desktop --setup-tcc-identity ------------------------------------------
+
+
+def _fake_proc(cmd, returncode=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
+
+
+def test_setup_tcc_identity_creates_cert_imports_trusts_and_configures(tmp_path, monkeypatch, capsys):
+    """Fresh identity: openssl generates, security imports + trusts, config is written."""
+    monkeypatch.setattr(cli_main.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cli_main.shutil,
+        "which",
+        lambda name: {"openssl": "/usr/bin/openssl", "security": "/usr/bin/security", "codesign": "/usr/bin/codesign"}.get(name),
+    )
+    monkeypatch.setattr(cli_main.Path, "home", classmethod(lambda cls: tmp_path))
+
+    identity = "Hermes Local Signing"
+    calls = []
+    state = {"trusted": False}
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:4] == ["/usr/bin/security", "find-identity", "-v", "-p"]:
+            # Valid only after import AND trust have both happened — mirrors
+            # real macOS, where an untrusted self-signed cert is invisible to
+            # the -v listing (the #77189 review finding).
+            if state["trusted"]:
+                return _fake_proc(cmd, stdout=f'  1) ABCD "{identity}"\n     1 valid identities found')
+            return _fake_proc(cmd, stdout="     0 valid identities found")
+        if cmd[0] == "/usr/bin/security" and cmd[1] == "add-trusted-cert":
+            state["trusted"] = True
+            return _fake_proc(cmd)
+        return _fake_proc(cmd)
+
+    monkeypatch.setattr(cli_main.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_main, "_desktop_packaged_executable", lambda d: None)
+    monkeypatch.setattr(cli_main, "_desktop_macos_relaunchable_fixup", lambda d: True)
+    # Avoid writing the real user config.
+    monkeypatch.setattr("hermes_cli.config.set_config_value", lambda key, value: None)
+
+    assert cli_main._desktop_macos_setup_tcc_identity(identity) is True
+
+    out = capsys.readouterr().out
+    assert "created, imported, and trusted self-signed identity" in out
+    assert "set desktop.macos_signing_identity" in out
+    # openssl cert generation + pkcs12 export + security import + trust all ran.
+    assert any(c[0] == "/usr/bin/openssl" and "req" in c for c in calls)
+    assert any(c[0] == "/usr/bin/openssl" and "pkcs12" in c for c in calls)
+    assert any(c[0] == "/usr/bin/security" and c[1] == "import" for c in calls)
+    assert any(c[0] == "/usr/bin/security" and c[1] == "add-trusted-cert" for c in calls)
+    # The trust step targets the codeSign policy specifically.
+    trust_call = next(c for c in calls if c[1:2] == ["add-trusted-cert"])
+    assert "codeSign" in trust_call and "trustRoot" in trust_call
+    # Temp files cleaned up.
+    assert not list(tmp_path.glob("hermes-tcc-*"))
+
+
+def test_setup_tcc_identity_retries_pkcs12_with_legacy_on_mac_verification_failure(tmp_path, monkeypatch, capsys):
+    """OpenSSL 3: first import fails with the MAC-verification signature, the
+    -legacy re-export imports cleanly (the exact failure @ctaylor86 hit live)."""
+    monkeypatch.setattr(cli_main.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cli_main.shutil,
+        "which",
+        lambda name: {"openssl": "/usr/bin/openssl", "security": "/usr/bin/security", "codesign": "/usr/bin/codesign"}.get(name),
+    )
+    monkeypatch.setattr(cli_main.Path, "home", classmethod(lambda cls: tmp_path))
+
+    identity = "Hermes Local Signing"
+    calls = []
+    state = {"legacy_exported": False, "trusted": False}
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:4] == ["/usr/bin/security", "find-identity", "-v", "-p"]:
+            if state["trusted"]:
+                return _fake_proc(cmd, stdout=f'  1) ABCD "{identity}"\n     1 valid identities found')
+            return _fake_proc(cmd, stdout="     0 valid identities found")
+        if cmd[0] == "/usr/bin/openssl" and "pkcs12" in cmd:
+            state["legacy_exported"] = "-legacy" in cmd
+            return _fake_proc(cmd)
+        if cmd[0] == "/usr/bin/security" and cmd[1] == "import":
+            if not state["legacy_exported"]:
+                return _fake_proc(
+                    cmd, returncode=1,
+                    stderr="security: SecKeychainItemImport: MAC verification failed during PKCS12 import (wrong password?)",
+                )
+            return _fake_proc(cmd)
+        if cmd[0] == "/usr/bin/security" and cmd[1] == "add-trusted-cert":
+            state["trusted"] = True
+            return _fake_proc(cmd)
+        return _fake_proc(cmd)
+
+    monkeypatch.setattr(cli_main.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_main, "_desktop_packaged_executable", lambda d: None)
+    monkeypatch.setattr(cli_main, "_desktop_macos_relaunchable_fixup", lambda d: True)
+    monkeypatch.setattr("hermes_cli.config.set_config_value", lambda key, value: None)
+
+    assert cli_main._desktop_macos_setup_tcc_identity(identity) is True
+
+    # Two pkcs12 exports (plain then -legacy) and two import attempts.
+    pkcs12_calls = [c for c in calls if c[0] == "/usr/bin/openssl" and "pkcs12" in c]
+    assert len(pkcs12_calls) == 2
+    assert "-legacy" not in pkcs12_calls[0] and "-legacy" in pkcs12_calls[1]
+    assert len([c for c in calls if c[0] == "/usr/bin/security" and c[1] == "import"]) == 2
+
+
+def test_setup_tcc_identity_fails_when_trust_step_fails(tmp_path, monkeypatch, capsys):
+    """A cert that imports but cannot be trusted for codeSign is a failure,
+    not a silent success."""
+    monkeypatch.setattr(cli_main.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cli_main.shutil,
+        "which",
+        lambda name: {"openssl": "/usr/bin/openssl", "security": "/usr/bin/security", "codesign": "/usr/bin/codesign"}.get(name),
+    )
+    monkeypatch.setattr(cli_main.Path, "home", classmethod(lambda cls: tmp_path))
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["/usr/bin/security", "find-identity", "-v", "-p"]:
+            return _fake_proc(cmd, stdout="     0 valid identities found")
+        if cmd[0] == "/usr/bin/security" and cmd[1] == "add-trusted-cert":
+            return _fake_proc(cmd, returncode=1, stderr="SecTrustSettingsSetTrustSettings: authorization denied")
+        return _fake_proc(cmd)
+
+    monkeypatch.setattr(cli_main.subprocess, "run", fake_run)
+
+    assert cli_main._desktop_macos_setup_tcc_identity("Hermes Local Signing") is False
+    assert "could not trust the certificate" in capsys.readouterr().out
+
+
+def test_setup_tcc_identity_fails_when_identity_never_becomes_valid(tmp_path, monkeypatch, capsys):
+    """Postcondition gate: import + trust both 'succeed' but find-identity -v
+    still lists nothing → report failure with guidance (the silent-success bug
+    from the original PR)."""
+    monkeypatch.setattr(cli_main.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cli_main.shutil,
+        "which",
+        lambda name: {"openssl": "/usr/bin/openssl", "security": "/usr/bin/security", "codesign": "/usr/bin/codesign"}.get(name),
+    )
+    monkeypatch.setattr(cli_main.Path, "home", classmethod(lambda cls: tmp_path))
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["/usr/bin/security", "find-identity", "-v", "-p"]:
+            return _fake_proc(cmd, stdout="     0 valid identities found")
+        return _fake_proc(cmd)
+
+    monkeypatch.setattr(cli_main.subprocess, "run", fake_run)
+
+    assert cli_main._desktop_macos_setup_tcc_identity("Hermes Local Signing") is False
+    assert "not a VALID code-signing identity" in capsys.readouterr().out
+
+
+def test_setup_tcc_identity_skips_generation_when_already_valid(tmp_path, monkeypatch, capsys):
+    """Idempotent: an existing VALID identity is reused, not regenerated."""
+    monkeypatch.setattr(cli_main.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cli_main.shutil,
+        "which",
+        lambda name: {"openssl": "/usr/bin/openssl", "security": "/usr/bin/security", "codesign": "/usr/bin/codesign"}.get(name),
+    )
+    monkeypatch.setattr(cli_main.Path, "home", classmethod(lambda cls: tmp_path))
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:4] == ["/usr/bin/security", "find-identity", "-v", "-p"]:
+            return _fake_proc(cmd, stdout='  1) ABCD "Hermes Local Signing"\n     1 valid identities found')
+        return _fake_proc(cmd)
+
+    monkeypatch.setattr(cli_main.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_main, "_desktop_packaged_executable", lambda d: None)
+    monkeypatch.setattr(cli_main, "_desktop_macos_relaunchable_fixup", lambda d: True)
+    monkeypatch.setattr("hermes_cli.config.set_config_value", lambda key, value: None)
+
+    assert cli_main._desktop_macos_setup_tcc_identity("Hermes Local Signing") is True
+
+    out = capsys.readouterr().out
+    assert "already valid in keychain" in out
+    # No openssl generation, no security import — only find-identity + config.
+    assert not any(c[0] == "/usr/bin/openssl" for c in calls)
+    assert not any(c[0] == "/usr/bin/security" and c[1] == "import" for c in calls)
+
+
+def test_setup_tcc_identity_untrusted_existing_cert_is_repaired(tmp_path, monkeypatch, capsys):
+    """A cert that EXISTS but is not valid (CSSMERR_TP_NOT_TRUSTED) is repaired
+    — regenerated/trusted — instead of being reported as already done. The
+    original name-in-output probe treated this state as success."""
+    monkeypatch.setattr(cli_main.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        cli_main.shutil,
+        "which",
+        lambda name: {"openssl": "/usr/bin/openssl", "security": "/usr/bin/security", "codesign": "/usr/bin/codesign"}.get(name),
+    )
+    monkeypatch.setattr(cli_main.Path, "home", classmethod(lambda cls: tmp_path))
+
+    calls = []
+    state = {"trusted": False}
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:4] == ["/usr/bin/security", "find-identity", "-v", "-p"]:
+            # -v never lists the untrusted cert; it only appears once the
+            # repair path has run add-trusted-cert.
+            if state["trusted"]:
+                return _fake_proc(cmd, stdout='  1) ABCD "Hermes Local Signing"\n     1 valid identities found')
+            return _fake_proc(cmd, stdout="     0 valid identities found")
+        if cmd[0] == "/usr/bin/security" and cmd[1] == "add-trusted-cert":
+            state["trusted"] = True
+            return _fake_proc(cmd)
+        return _fake_proc(cmd)
+
+    monkeypatch.setattr(cli_main.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_main, "_desktop_packaged_executable", lambda d: None)
+    monkeypatch.setattr(cli_main, "_desktop_macos_relaunchable_fixup", lambda d: True)
+    monkeypatch.setattr("hermes_cli.config.set_config_value", lambda key, value: None)
+
+    assert cli_main._desktop_macos_setup_tcc_identity("Hermes Local Signing") is True
+    assert any(c[0] == "/usr/bin/security" and c[1] == "add-trusted-cert" for c in calls)
+
+
+def test_setup_tcc_identity_non_macos_skips(tmp_path, monkeypatch, capsys):
+    """On non-macOS the setup is a no-op failure (not a crash)."""
+    monkeypatch.setattr(cli_main.sys, "platform", "linux")
+
+    assert cli_main._desktop_macos_setup_tcc_identity() is False
+    assert "macOS-only" in capsys.readouterr().out
+
+
+def test_cmd_gui_setup_tcc_identity_exits_before_build(tmp_path, monkeypatch):
+    """`hermes desktop --setup-tcc-identity` calls the setup and exits 0/1
+    without building or launching the app."""
+    root = _make_desktop_tree(tmp_path)
+    monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
+    _make_packaged_executable(root, monkeypatch)
+
+    with patch("hermes_cli.main._desktop_macos_setup_tcc_identity", return_value=True) as mock_setup, \
+         patch("hermes_cli.main._run_npm_install_deterministic") as mock_install, \
+         pytest.raises(SystemExit) as exc:
+        cli_main.cmd_gui(_ns(setup_tcc_identity=True, identity="Hermes Local Signing"))
+
+    assert exc.value.code == 0
+    mock_setup.assert_called_once_with("Hermes Local Signing")
+    mock_install.assert_not_called()
+
+
 # --- desktop.* launch options (config.yaml) -------------------------------
 
 
@@ -588,8 +839,73 @@ def test_gui_skips_desktop_entry_off_linux(tmp_path, monkeypatch):
 def test_desktop_launch_options_normalizes_password_store(raw, expected):
     cfg = {"desktop": {"password_store": raw}}
     with patch("hermes_cli.config.load_config", return_value=cfg):
-        _, _, store = cli_main._desktop_launch_options()
+        _, _, store, _ = cli_main._desktop_launch_options()
     assert store == expected
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("x11", "x11"),
+        ("WAYLAND", "wayland"),
+        ("auto", "auto"),
+        ("bogus", "auto"),
+        (True, "auto"),
+    ],
+)
+def test_desktop_launch_options_normalizes_ozone_hint(raw, expected):
+    """``desktop.ozone_platform_hint`` normalizes to x11/wayland/auto."""
+    cfg = {"desktop": {"ozone_platform_hint": raw}}
+    with patch("hermes_cli.config.load_config", return_value=cfg):
+        _, _, _, hint = cli_main._desktop_launch_options()
+    assert hint == expected
+
+
+def test_desktop_launch_options_ozone_hint_defaults_auto():
+    with patch("hermes_cli.config.load_config", return_value={}):
+        assert cli_main._desktop_launch_options()[3] == "auto"
+
+
+def test_gui_bridges_ozone_hint_to_launch_env(tmp_path, monkeypatch):
+    """COSMIC HUD: ``desktop.ozone_platform_hint: x11`` sets
+    ``ELECTRON_OZONE_PLATFORM_HINT`` on the launched Electron process."""
+    root = _make_desktop_tree(tmp_path)
+    monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
+    _make_packaged_executable(root, monkeypatch)
+
+    ok = subprocess.CompletedProcess([], 0)
+    cfg = {"desktop": {"ozone_platform_hint": "x11"}}
+
+    with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"), \
+         patch("hermes_cli.main._run_npm_install_deterministic", return_value=ok), \
+         patch("hermes_cli.main._desktop_build_needed", return_value=True), \
+         patch("hermes_cli.main._write_desktop_build_stamp"), \
+         patch("hermes_cli.main._desktop_macos_relaunchable_fixup"), \
+         patch("hermes_cli.main._desktop_linux_sandbox_fixup", return_value=True), \
+         patch("hermes_cli.config.load_config", return_value=cfg), \
+         patch("hermes_cli.linux_desktop_entry.install_desktop_entry", return_value=None), \
+         patch("hermes_cli.main.subprocess.run", side_effect=[ok, ok]) as mock_run, \
+         pytest.raises(SystemExit):
+        cli_main.cmd_gui(_ns())
+
+    launch_env = mock_run.call_args_list[1].kwargs["env"]
+    assert launch_env.get("ELECTRON_OZONE_PLATFORM_HINT") == "x11"
+
+    monkeypatch.setenv("ELECTRON_OZONE_PLATFORM_HINT", "wayland")
+    with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"), \
+         patch("hermes_cli.main._run_npm_install_deterministic", return_value=ok), \
+         patch("hermes_cli.main._desktop_build_needed", return_value=True), \
+         patch("hermes_cli.main._write_desktop_build_stamp"), \
+         patch("hermes_cli.main._desktop_macos_relaunchable_fixup"), \
+         patch("hermes_cli.main._desktop_linux_sandbox_fixup", return_value=True), \
+         patch("hermes_cli.config.load_config", return_value=cfg), \
+         patch("hermes_cli.linux_desktop_entry.install_desktop_entry", return_value=None), \
+         patch("hermes_cli.main.subprocess.run", side_effect=[ok, ok]) as mock_run2, \
+         pytest.raises(SystemExit):
+        cli_main.cmd_gui(_ns())
+
+    launch_env = mock_run2.call_args_list[1].kwargs["env"]
+    assert launch_env.get("ELECTRON_OZONE_PLATFORM_HINT") == "wayland"
 
 
 # --- desktop.password_store detection & bridging (linux) ------------------
