@@ -14,6 +14,7 @@ import type { GroupChatRoom } from './group-chat'
 import { groupMemberAuthor, groupMemberKey } from './group-membership'
 import { buildGroupChatTurnPrompt, formatGroupDeltaLines } from './group-round-prompt'
 import { isGroupPassText, runGroupChatMemberTurn } from './group-turns'
+import { applyGroupWorkTurn } from './group-work'
 import type { Attachment, GroupMember, GroupMessage } from './types'
 
 export interface GroupRoundMemberContext {
@@ -28,7 +29,15 @@ export interface GroupRoundMemberContext {
   maxMessages?: number
   /** False = a chat-only room preset; the turn prompt forbids tools. */
   toolCapable?: boolean
+  /** The room runs the work loop (group-work.ts). */
+  workLoop?: boolean
+  /** Members holding an open work claim on this thread THIS round. */
+  claimKeys?: ReadonlySet<string>
 }
+
+/** The delta line a claim holder gets when nothing new was said: it is
+ *  continuing its own task, not reacting to the room. */
+export const GROUP_WORK_CONTINUE_LINE = '(no new messages - continue the task you claimed)'
 
 /** #93129: a held member's skip must consume its delta exactly once —
  *  advance the watermark past the current log so the same entries never
@@ -65,8 +74,11 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
   // Delta: NEW room entries, narrowed to this thread — the member's
   // turn sees only the conversation it's part of.
   const delta = room.log.slice(seen).filter((e: GroupMessage) => groupThreadOf(e) === thread)
+  // A member mid-task is continuing its OWN work, not reacting to new
+  // messages, so an empty delta must not skip its turn.
+  const holdsClaim = Boolean(context.claimKeys?.has(memberKey))
 
-  if (!delta.length) {
+  if (!delta.length && !holdsClaim) {
     return null
   }
 
@@ -127,8 +139,11 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
     groupName: context.group,
     members,
     viewer: member,
-    deltaLines: formatGroupDeltaLines(visibleDelta, member, context.group),
-    toolCapable: context.toolCapable !== false
+    deltaLines: visibleDelta.length
+      ? formatGroupDeltaLines(visibleDelta, member, context.group)
+      : [GROUP_WORK_CONTINUE_LINE],
+    toolCapable: context.toolCapable !== false,
+    workLoop: Boolean(context.workLoop)
   })
 
   // Images riding this delta (user attachments — member entries don't
@@ -283,6 +298,11 @@ export async function runGroupRoundMember(
 
   if (reply !== null && spoke) {
     appendGroupChatEntry(context.group, groupMemberAuthor(member), reply, thread)
+  }
+
+  // "(working)" keeps this member's claim open; any other answer releases it.
+  if (context.workLoop && reply !== null) {
+    applyGroupWorkTurn(context.group, thread, member, reply)
   }
 
   // A member's own entries — its reply, and the rows group-external-writes.ts

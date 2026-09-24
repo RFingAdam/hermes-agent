@@ -162,6 +162,7 @@ const GROUP_ACTIVITY_LABELS: Record<GroupActivityKind, string> = {
   replied: 'replied',
   passed: 'passed',
   'timed-out': 'took too long',
+  stalled: 'stopped making progress — work claim released',
   failed: 'hit an error',
   cancelled: 'turn interrupted by a newer message',
   settled: 'turn settled',
@@ -183,13 +184,14 @@ export const GROUP_ACTIVITY_GLYPHS: Record<GroupActivityKind, string> = {
   capped: 'debug-step-over',
   delivered: 'mail-read',
   held: 'debug-pause',
+  stalled: 'warning',
   stopped: 'debug-stop'
 }
 
 /** Text tone for an activity row: quiet for pass/cancel/settle, accent for
  *  work and real replies, destructive for failures and timeouts. */
 export function groupActivityTone(kind: GroupActivityKind) {
-  if (kind === 'failed' || kind === 'timed-out') {
+  if (kind === 'failed' || kind === 'timed-out' || kind === 'stalled') {
     return 'text-destructive'
   }
 

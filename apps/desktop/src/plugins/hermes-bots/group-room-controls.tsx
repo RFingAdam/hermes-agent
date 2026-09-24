@@ -1,7 +1,7 @@
 /**
  * Room-header controls for the per-room Bot Mode policy: the preset menu
- * (build / decide / standing). The policy itself lives in
- * group-room-policy.ts; this is only its chrome.
+ * (build / decide / standing) and the work-loop switch. The policy itself
+ * lives in group-room-policy.ts and group-work.ts; this is only its chrome.
  */
 import {
   Button,
@@ -10,6 +10,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
   Tip,
   useValue
@@ -17,6 +18,7 @@ import {
 
 import { $groupChats, normalizeGroupChatRoomMode } from './group-chat'
 import { getGroupChatCeilings, setGroupChatRoomMode } from './group-room-policy'
+import { groupChatWorkLoopEnabled, setGroupChatWorkLoop } from './group-work'
 import { useBots } from './i18n'
 import type { GroupChatRoomMode, GroupMember } from './types'
 
@@ -38,6 +40,7 @@ export function GroupRoomModeMenu({ group, members }: GroupRoomModeMenuProps) {
   const b = useBots()
   const rooms = useValue($groupChats)
   const mode = normalizeGroupChatRoomMode(rooms[group]?.mode)
+  const workLoop = groupChatWorkLoopEnabled(rooms[group])
   const ceilings = getGroupChatCeilings(group, members)
 
   const modeName: Record<'default' | GroupChatRoomMode, string> = {
@@ -94,6 +97,14 @@ export function GroupRoomModeMenu({ group, members }: GroupRoomModeMenuProps) {
             {(mode || 'default') === value ? <Codicon name="check" /> : null}
           </DropdownMenuItem>
         ))}
+        <DropdownMenuSeparator />
+        {/* Independent of the preset: any mode can run with members finishing
+            tasks across turns, or stopping after one message. */}
+        <DropdownMenuItem onSelect={() => setGroupChatWorkLoop(group, !workLoop)}>
+          <Codicon className="mr-1.5" name="sync" />
+          <span className="min-w-0 flex-1">{workLoop ? b.group.workLoopOn : b.group.workLoopOff}</span>
+          {workLoop ? <Codicon name="check" /> : null}
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )

@@ -185,6 +185,9 @@ type BotsMessages = {
   }
   /** Group chats: the room, its composer, threads and activity feed. */
   group: {
+    /** The room-header menu's work-loop switch (group-work.ts). */
+    workLoopOn: string
+    workLoopOff: string
     /** Per-room Bot Mode presets (group-room-policy.ts): the header menu. */
     roomModeDefault: string
     roomModeBuild: string
@@ -469,6 +472,8 @@ const en: BotsMessages = {
     generating: 'Generating…'
   },
   group: {
+    workLoopOn: 'Work loop on — bots finish tasks',
+    workLoopOff: 'Work loop off — one reply per turn',
     roomModeDefault: 'Default',
     roomModeBuild: 'Build',
     roomModeDecide: 'Decide',
@@ -748,6 +753,8 @@ const ja: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    workLoopOn: '作業ループ オン — ボットがタスクを最後まで進める',
+    workLoopOff: '作業ループ オフ — 1 ターンに 1 返信',
     roomModeDefault: 'デフォルト',
     roomModeBuild: 'ビルド',
     roomModeDecide: '決定',
@@ -1022,6 +1029,8 @@ const zh: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    workLoopOn: '工作循环已开启 — 机器人会完成任务',
+    workLoopOff: '工作循环已关闭 — 每轮只回复一次',
     roomModeDefault: '默认',
     roomModeBuild: '构建',
     roomModeDecide: '决策',
@@ -1293,6 +1302,8 @@ const zhHant: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    workLoopOn: '工作循環已開啟 — 機器人會完成任務',
+    workLoopOff: '工作循環已關閉 — 每輪只回覆一次',
     roomModeDefault: '預設',
     roomModeBuild: '建置',
     roomModeDecide: '決策',

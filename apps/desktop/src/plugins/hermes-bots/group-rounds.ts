@@ -29,6 +29,7 @@ import { getGroupChatCeilings, summarizeGroupChat } from './group-room-policy'
 import { runGroupContinuationMembers, runGroupRoundMember } from './group-round-members'
 import { rejectGroupSlashCommand } from './group-slash'
 import { GROUP_TURN_HARD_CAP_MS, harvestStrandedGroupReply } from './group-turns'
+import { GROUP_WORK_HARD_TURN_BACKSTOP, hasOpenGroupWorkClaims, openGroupWorkClaims } from './group-work'
 import { botsText } from './i18n'
 import { requestForBot } from './routing'
 import type { Attachment, GroupMember, GroupMessage } from './types'
@@ -582,9 +583,16 @@ export async function runGroupChatRounds(
 
   const startEpoch = ($groupChats.get()[group] || {}).epoch || 0
   const isCurrent = () => binding.isLive() && (($groupChats.get()[group] || {}).epoch || 0) === startEpoch
-  const { autoSummary, maxRounds, maxMessages, toolCapable, wallClockMs } = getGroupChatCeilings(group, members)
+  const { autoSummary, maxRounds, maxMessages, toolCapable, wallClockMs, workLoop } = getGroupChatCeilings(
+    group,
+    members
+  )
+
   const deadline = wallClockMs ? Date.now() + wallClockMs : null
   const pastDeadline = () => deadline !== null && Date.now() >= deadline
+  // A member holding a work claim decides for itself when it is done, so the
+  // room's round, message and wall-clock ceilings never cut it off mid-task.
+  const claimsOpen = () => workLoop && hasOpenGroupWorkClaims(group, thread)
 
   const context = {
     get group() {
@@ -597,7 +605,9 @@ export async function runGroupChatRounds(
     binding,
     isCurrent,
     maxMessages,
-    toolCapable
+    toolCapable,
+    workLoop,
+    claimKeys: new Set<string>()
   }
 
   let posted = 0
@@ -608,10 +618,17 @@ export async function runGroupChatRounds(
   let exitKind: 'capped' | 'settled' = 'settled'
 
   try {
-    for (let round = 0; round < maxRounds; round++) {
+    for (let round = 0; round < maxRounds || claimsOpen(); round++) {
+      // The backstop only catches a member that never releases its claim.
+      if (round >= GROUP_WORK_HARD_TURN_BACKSTOP) {
+        exitKind = 'capped'
+
+        return
+      }
+
       // Extended mode's wall-clock ceiling, independent of the round and
       // message caps (stock has none: `deadline` is null).
-      if (pastDeadline()) {
+      if (pastDeadline() && !claimsOpen()) {
         exitKind = 'capped'
 
         return
@@ -656,23 +673,40 @@ export async function runGroupChatRounds(
       // {before, thread} post-thread.
       const strandedNow = ($groupChats.get()[group] || {}).stranded || {}
 
-      const responders = rotateGroupSpeakers(resolveGroupResponders(roomLog, members), round).filter(
-        (member: GroupMember) => !Object.prototype.hasOwnProperty.call(strandedNow, groupMemberKey(member))
-      )
+      // Claim holders keep the floor and go first, whoever was @mentioned.
+      const claimKeys = workLoop ? openGroupWorkClaims(group, thread) : []
+      context.claimKeys = new Set(claimKeys)
+
+      const responders = [
+        ...members.filter(member => context.claimKeys.has(groupMemberKey(member))),
+        ...rotateGroupSpeakers(resolveGroupResponders(roomLog, members), round).filter(
+          member => !context.claimKeys.has(groupMemberKey(member))
+        )
+      ].filter((member: GroupMember) => !Object.prototype.hasOwnProperty.call(strandedNow, groupMemberKey(member)))
 
       let spokeThisRound = 0
 
       for (const member of responders) {
-        if (!isCurrent() || posted >= maxMessages || pastDeadline()) {
-          if (!isCurrent()) {
-            recordGroupActivity(group, {
-              kind: 'cancelled',
-              member: null,
-              thread
-            })
-          } else {
-            exitKind = 'capped' // message or wall-clock cap, not consensus (#94478)
+        if (!isCurrent()) {
+          recordGroupActivity(group, {
+            kind: 'cancelled',
+            member: null,
+            thread
+          })
+
+          return
+        }
+
+        if (
+          !context.claimKeys.has(groupMemberKey(member)) &&
+          (round >= maxRounds || posted >= maxMessages || pastDeadline())
+        ) {
+          // Past a ceiling only claim holders still take turns.
+          if (claimsOpen()) {
+            continue
           }
+
+          exitKind = 'capped' // message or wall-clock cap, not consensus (#94478)
 
           return
         }

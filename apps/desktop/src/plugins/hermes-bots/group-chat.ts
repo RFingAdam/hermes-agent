@@ -1450,9 +1450,12 @@ export function normalizeGroupChatRoomMode(mode: unknown): GroupChatRoomMode | n
  *  Local like `sectionId`: deliberately not part of the gateway projection. */
 export function groupChatPolicyFields(room: Partial<GroupChat> | null | undefined): Partial<GroupChat> {
   const mode = normalizeGroupChatRoomMode(room?.mode)
+  const working = room?.working && typeof room.working === 'object' ? room.working : {}
 
   return {
-    ...(mode ? { mode } : {})
+    ...(mode ? { mode } : {}),
+    ...(room?.workLoop === false ? { workLoop: false as const } : {}),
+    ...(Object.keys(working).length ? { working } : {})
   }
 }
 

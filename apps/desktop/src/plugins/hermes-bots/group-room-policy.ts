@@ -28,6 +28,7 @@ import {
   normalizeGroupChatRoomMode,
   updateGroupChat
 } from './group-chat'
+import { groupChatWorkLoopEnabled } from './group-work'
 import { getPluginCtx } from './shared'
 import type { GroupChatRoomMode, GroupMember } from './types'
 
@@ -110,6 +111,8 @@ export interface GroupChatCeilings {
   toolCapable: boolean
   /** Null = no wall-clock cap (stock). */
   wallClockMs: null | number
+  /** Members may keep the floor across rounds (group-work.ts). */
+  workLoop: boolean
 }
 
 /** Flip extended mode and persist it. */
@@ -188,7 +191,8 @@ export function getModeCeilings(mode: unknown, memberCount: number): GroupChatCe
     wallClockMs: preset.wallClockMs,
     autoSummary: preset.autoSummaryOnCap,
     toolCapable: preset.toolCapable,
-    mode: key
+    mode: key,
+    workLoop: true
   }
 }
 
@@ -200,9 +204,12 @@ export function getGroupChatCeilings(group?: string, members: GroupMember[] = []
   const room = group ? $groupChats.get()[group] : undefined
   const memberCount = members.length || room?.members?.length || 1
   const preset = getModeCeilings(room?.mode, memberCount)
+  // The work loop is independent of the preset: any mode can run with
+  // members finishing tasks across turns or stopping after one message.
+  const workLoop = groupChatWorkLoopEnabled(room)
 
   if (preset) {
-    return preset
+    return { ...preset, workLoop }
   }
 
   if (!$groupChatExtendedMode.get()) {
@@ -212,7 +219,8 @@ export function getGroupChatCeilings(group?: string, members: GroupMember[] = []
       wallClockMs: null,
       autoSummary: false,
       toolCapable: true,
-      mode: null
+      mode: null,
+      workLoop
     }
   }
 
@@ -222,7 +230,8 @@ export function getGroupChatCeilings(group?: string, members: GroupMember[] = []
     wallClockMs: extendedOverride.wallClockMs ?? GROUP_CHAT_EXTENDED_WALL_CLOCK_MS,
     autoSummary: false,
     toolCapable: true,
-    mode: null
+    mode: null,
+    workLoop
   }
 }
 

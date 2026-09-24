@@ -149,6 +149,8 @@ interface GroupChatTurnPromptInput {
   /** False (a chat-only room preset) forbids tool use for this turn. */
   toolCapable?: boolean
   viewer: GroupMember
+  /** Teach the work-loop sentinels (group-work.ts). */
+  workLoop?: boolean
 }
 
 /** Opens every room-fed turn prompt; group-external-writes.ts tells the room's
@@ -163,7 +165,8 @@ export function buildGroupChatTurnPrompt({
   members,
   viewer,
   deltaLines,
-  toolCapable = true
+  toolCapable = true,
+  workLoop = false
 }: GroupChatTurnPromptInput) {
   const viewerKey = groupMemberKey(viewer)
   const peers = members.filter(m => groupMemberKey(m) !== viewerKey)
@@ -182,6 +185,15 @@ export function buildGroupChatTurnPrompt({
     '- Mention a teammate as @name to pull them in; mention @user only for a judgment call or a result the user needs. Do not repeat points already made.',
     '- Never reveal content from your private 1:1 chats. Your reply text goes to the room verbatim — no preamble, no meta-commentary.'
   ]
+
+  if (workLoop) {
+    rules.push(
+      '- If you take on a task, work it to completion across turns instead of stopping after one message. End each turn that still has work left with exactly "(working)" on its own final line to keep the floor - you will be given another turn.',
+      '- When the task is finished or you are stuck, end with "(done)" or "(blocked)" on its own final line and include your report:',
+      '  **Done** or **Blocked** followed by one line of outcome, then "- Did:", "- Next:", and "- Blockers:" (write "none" where it does not apply).',
+      '- Nobody will cut you off mid-task, so do not rush or pad. Repeating yourself with no new progress releases the claim, so only say "(working)" when you actually advanced something.'
+    )
+  }
 
   if (!toolCapable) {
     rules.push(

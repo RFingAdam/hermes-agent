@@ -186,6 +186,17 @@ export interface GroupMessage {
  *  stock / "Extended rounds" ceilings. */
 export type GroupChatRoomMode = 'build' | 'decide' | 'standing'
 
+/** An open work-loop claim (group-work.ts): the member keeps the floor on
+ *  `thread` until it releases the claim. */
+export interface GroupWorkClaim {
+  /** Consecutive turns whose reply matched `signature` (no-progress guard). */
+  repeats: number
+  signature: string
+  startedAt: number
+  thread: string
+  turns: number
+}
+
 export interface GroupHold {
   at?: number
   noted?: boolean
@@ -206,6 +217,11 @@ export interface GroupChat {
   members?: GroupMember[]
   /** Per-room preset; overrides the install-wide ceilings when set. */
   mode?: GroupChatRoomMode
+  /** Work-loop opt-out; only `false` is ever stored (group-work.ts). */
+  workLoop?: false
+  /** Open work-loop claims by member key. Persisted so a window restart
+   *  resumes the loop on the thread's next drive. */
+  working?: Record<string, GroupWorkClaim>
   /** Immutable identity, so a rename doesn't fork the room. */
   roomId?: null | string
   running?: boolean
@@ -287,6 +303,7 @@ export type GroupActivityKind =
   | 'queued'
   | 'replied'
   | 'settled'
+  | 'stalled'
   | 'stopped'
   | 'timed-out'
   | 'working'
