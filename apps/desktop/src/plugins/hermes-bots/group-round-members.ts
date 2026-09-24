@@ -33,6 +33,8 @@ export interface GroupRoundMemberContext {
   workLoop?: boolean
   /** Members holding an open work claim on this thread THIS round. */
   claimKeys?: ReadonlySet<string>
+  /** Count one dispatched turn against the drive's token ceiling. */
+  noteSpend?(member: GroupMember, prompt: string, reply: null | string): void
 }
 
 /** The delta line a claim holder gets when nothing new was said: it is
@@ -226,6 +228,9 @@ export async function runGroupRoundMember(
     context.failedMembers?.add(groupMemberKey(member))
     reply = null // a failed turn is a pass, never a room error
   }
+
+  // A dispatched prompt is spent whether or not its reply is ever committed.
+  context.noteSpend?.(member, prompt, reply)
 
   // #93127: the turn may have finished AFTER a newer user send bumped
   // the room epoch. That newer send's loop re-drives this member with

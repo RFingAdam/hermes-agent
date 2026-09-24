@@ -235,6 +235,57 @@ export function getGroupChatCeilings(group?: string, members: GroupMember[] = []
   }
 }
 
+// Per-drive spend ceiling. Unlike the round and wall-clock ceilings it DOES
+// apply to a member holding a work claim: a claim means "let me finish", not
+// "spend without limit". The desktop has no usage RPC of its own, so the
+// figure is an ESTIMATE from prompt and reply characters (~4 per token) — a
+// smoke alarm that stops a drive burning far more than expected, not an
+// invoice, and the note it posts says so.
+export const GROUP_TOKEN_CHARS_PER_TOKEN = 4
+export const GROUP_TOKEN_BUDGETS: Readonly<Record<GroupChatRoomMode, number>> = Object.freeze({
+  build: 400_000,
+  standing: 120_000,
+  decide: 60_000
+})
+export const GROUP_TOKEN_BUDGET_DEFAULT = 200_000
+
+export function estimateGroupTokens(text: unknown): number {
+  return Math.ceil(String(text ?? '').length / GROUP_TOKEN_CHARS_PER_TOKEN)
+}
+
+/** A room's per-drive token ceiling: an explicit `tokenBudget` wins, then
+ *  the preset's, then the default. Zero or negative disables it (Infinity). */
+export function groupTokenBudget(group: string): number {
+  const room = $groupChats.get()[group]
+  const explicit = Number(room?.tokenBudget)
+
+  if (room?.tokenBudget !== undefined && Number.isFinite(explicit)) {
+    return explicit > 0 ? explicit : Infinity
+  }
+
+  const mode = normalizeGroupChatRoomMode(room?.mode)
+
+  return (mode && GROUP_TOKEN_BUDGETS[mode]) || GROUP_TOKEN_BUDGET_DEFAULT
+}
+
+/** What one drive has spent so far. */
+export interface GroupSpendMeter {
+  /** Count one member turn: the prompt it was sent and what came back. */
+  noteTurn(prompt: string, reply: null | string): void
+  spent(): number
+}
+
+export function createGroupSpendMeter(): GroupSpendMeter {
+  let estimated = 0
+
+  return {
+    noteTurn(prompt, reply) {
+      estimated += estimateGroupTokens(prompt) + estimateGroupTokens(reply)
+    },
+    spent: () => estimated
+  }
+}
+
 /** Set a room's preset on its record; null or an unknown value clears it. */
 export function setGroupChatRoomMode(group: string, mode: unknown): GroupChatRoomMode | null {
   const next = normalizeGroupChatRoomMode(mode)

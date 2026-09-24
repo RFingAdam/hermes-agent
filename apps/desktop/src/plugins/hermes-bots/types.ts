@@ -217,6 +217,9 @@ export interface GroupChat {
   members?: GroupMember[]
   /** Per-room preset; overrides the install-wide ceilings when set. */
   mode?: GroupChatRoomMode
+  /** Explicit per-drive token ceiling; 0 or less disables it
+   *  (group-room-policy.ts `groupTokenBudget`). */
+  tokenBudget?: number
   /** Work-loop opt-out; only `false` is ever stored (group-work.ts). */
   workLoop?: false
   /** Open work-loop claims by member key. Persisted so a window restart

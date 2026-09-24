@@ -1452,8 +1452,11 @@ export function groupChatPolicyFields(room: Partial<GroupChat> | null | undefine
   const mode = normalizeGroupChatRoomMode(room?.mode)
   const working = room?.working && typeof room.working === 'object' ? room.working : {}
 
+  const tokenBudget = Number(room?.tokenBudget)
+
   return {
     ...(mode ? { mode } : {}),
+    ...(room?.tokenBudget !== undefined && Number.isFinite(tokenBudget) ? { tokenBudget } : {}),
     ...(room?.workLoop === false ? { workLoop: false as const } : {}),
     ...(Object.keys(working).length ? { working } : {})
   }

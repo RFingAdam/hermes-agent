@@ -25,11 +25,16 @@ import {
   groupSessionKey,
   hasThreadScopedGroupSession
 } from './group-membership'
-import { getGroupChatCeilings, summarizeGroupChat } from './group-room-policy'
+import { createGroupSpendMeter, getGroupChatCeilings, groupTokenBudget, summarizeGroupChat } from './group-room-policy'
 import { runGroupContinuationMembers, runGroupRoundMember } from './group-round-members'
 import { rejectGroupSlashCommand } from './group-slash'
 import { GROUP_TURN_HARD_CAP_MS, harvestStrandedGroupReply } from './group-turns'
-import { GROUP_WORK_HARD_TURN_BACKSTOP, hasOpenGroupWorkClaims, openGroupWorkClaims } from './group-work'
+import {
+  clearGroupWorkClaim,
+  GROUP_WORK_HARD_TURN_BACKSTOP,
+  hasOpenGroupWorkClaims,
+  openGroupWorkClaims
+} from './group-work'
 import { botsText } from './i18n'
 import { requestForBot } from './routing'
 import type { Attachment, GroupMember, GroupMessage } from './types'
@@ -593,6 +598,8 @@ export async function runGroupChatRounds(
   // A member holding a work claim decides for itself when it is done, so the
   // room's round, message and wall-clock ceilings never cut it off mid-task.
   const claimsOpen = () => workLoop && hasOpenGroupWorkClaims(group, thread)
+  const tokenBudget = groupTokenBudget(group)
+  const spend = createGroupSpendMeter()
 
   const context = {
     get group() {
@@ -607,7 +614,8 @@ export async function runGroupChatRounds(
     maxMessages,
     toolCapable,
     workLoop,
-    claimKeys: new Set<string>()
+    claimKeys: new Set<string>(),
+    noteSpend: (_member: GroupMember, prompt: string, reply: null | string) => spend.noteTurn(prompt, reply)
   }
 
   let posted = 0
@@ -616,6 +624,8 @@ export async function runGroupChatRounds(
   // passed with nothing pending); 'capped' means a round/message/continuation
   // cap forced the exit — the activity feed must tell those apart.
   let exitKind: 'capped' | 'settled' = 'settled'
+  // The spend ceiling says so itself; a decide summary on top would be noise.
+  let budgetStopped = false
 
   try {
     for (let round = 0; round < maxRounds || claimsOpen(); round++) {
@@ -630,6 +640,28 @@ export async function runGroupChatRounds(
       // message caps (stock has none: `deadline` is null).
       if (pastDeadline() && !claimsOpen()) {
         exitKind = 'capped'
+
+        return
+      }
+
+      // Spend ceiling — the one ceiling that applies to a claim holder too.
+      // Open claims are released so nothing silently resumes on the next drive.
+      const spent = spend.spent()
+
+      if (spent >= tokenBudget) {
+        exitKind = 'capped'
+        budgetStopped = true
+
+        for (const key of openGroupWorkClaims(group, thread)) {
+          clearGroupWorkClaim(group, key)
+        }
+
+        appendGroupChatEntry(
+          group,
+          { kind: 'system', name: 'Budget' },
+          `Room stopped at roughly ${spent.toLocaleString()} estimated tokens (ceiling ${tokenBudget.toLocaleString()}). This is a character-based estimate, not a billed figure. Open work claims were released; send a message to continue.`,
+          thread
+        )
 
         return
       }
@@ -781,7 +813,7 @@ export async function runGroupChatRounds(
 
       // A decide-mode room always ends with a record of where it got to —
       // on a ceiling only; a room that settled on its own needs no summary.
-      if (autoSummary && exitKind === 'capped') {
+      if (autoSummary && exitKind === 'capped' && !budgetStopped) {
         try {
           summarizeGroupChat(group, members, thread)
         } catch {

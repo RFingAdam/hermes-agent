@@ -323,3 +323,61 @@ describe('room presets', () => {
     expect(snapshot.rooms['name:Room'].log[0].from.kind).toBe('system')
   })
 })
+
+describe('spend ceiling', () => {
+  it('stops a drive that outspends its budget, releases claims and says it is an estimate', async () => {
+    const long = 'x'.repeat(4000)
+
+    const room = await loadRoom({
+      turn: ({ n, profile }) => (profile === 'builder' ? `${long} ${n}\n(working)` : '(pass)')
+    })
+
+    room.chat.updateGroupChat('Spendy', current => ({ ...current, tokenBudget: 2000 }))
+    const thread = room.rounds.sendToGroupChat('Spendy', MEMBERS, '@builder go') as string
+    await settle(room, 'Spendy')
+
+    const notes = (room.chat.$groupChats.get().Spendy?.log || []).filter(entry => entry.from.kind === 'system')
+
+    expect(notes).toHaveLength(1)
+    expect(notes[0].thread).toBe(thread)
+    expect(notes[0].text).toMatch(/Room stopped at roughly [\d,.\s]+ estimated tokens \(ceiling 2[,.\s]?000\)/)
+    expect(notes[0].text).toContain('character-based estimate')
+    // ~1000 tokens a reply: the claim holder is stopped after two turns,
+    // long before the work loop's backstop.
+    expect(room.gateway.calls.filter(call => call.profile === 'builder')).toHaveLength(2)
+    expect(room.chat.$groupChats.get().Spendy?.working || {}).toEqual({})
+    expect(room.chat.$groupChats.get().Spendy?.running).toBe(false)
+  })
+
+  it('resolves an explicit budget first, then the preset, then the default', async () => {
+    const { chat, policy } = await loadRoom()
+
+    chat.updateGroupChat('Room', current => current)
+    expect(policy.groupTokenBudget('Room')).toBe(policy.GROUP_TOKEN_BUDGET_DEFAULT)
+
+    policy.setGroupChatRoomMode('Room', 'decide')
+    expect(policy.groupTokenBudget('Room')).toBe(policy.GROUP_TOKEN_BUDGETS.decide)
+    expect(policy.groupTokenBudget('Room')).toBeLessThan(policy.GROUP_TOKEN_BUDGET_DEFAULT)
+
+    chat.updateGroupChat('Room', current => ({ ...current, tokenBudget: 5000 }))
+    expect(policy.groupTokenBudget('Room')).toBe(5000)
+    expect(chat.durableGroupChatRooms().Room.tokenBudget).toBe(5000)
+
+    chat.updateGroupChat('Room', current => ({ ...current, tokenBudget: 0 }))
+    expect(policy.groupTokenBudget('Room')).toBe(Infinity)
+  })
+
+  it('estimates roughly four characters a token, counting the prompt and the reply', async () => {
+    const { policy } = await loadRoom()
+    const meter = policy.createGroupSpendMeter()
+
+    expect(policy.estimateGroupTokens('abcd')).toBe(1)
+    expect(policy.estimateGroupTokens('abcde')).toBe(2)
+    expect(policy.estimateGroupTokens(null)).toBe(0)
+
+    meter.noteTurn('x'.repeat(400), 'y'.repeat(40))
+    meter.noteTurn('x'.repeat(400), null)
+
+    expect(meter.spent()).toBe(100 + 10 + 100)
+  })
+})
