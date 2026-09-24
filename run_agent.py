@@ -958,13 +958,28 @@ class AIAgent(
         blocks the rest."""
         # close() is the hard owner boundary; shutdown_memory_provider() is idempotent so gateway pre-calls
         # never double-extract.
+        # Phase timing (WARNING only past 1s, so normal closes log nothing): diagnoses the gateway watchdog
+        # exit-75 loop, where the event loop stalled during a large session's close().
+        phase_start = [time.monotonic()]
+
+        def _phase_done(label: str) -> None:
+            now = time.monotonic()
+            elapsed, phase_start[0] = now - phase_start[0], now
+            if elapsed > 1.0:
+                logger.warning("AIAgent.close() slow step: %s took %.2fs (session=%s)",
+                               label, elapsed, getattr(self, "session_id", None))
+
         session_messages = getattr(self, "_session_messages", None)
         _quietly(self.shutdown_memory_provider, session_messages if isinstance(session_messages, list) else None)
+        _phase_done("shutdown_memory_provider")
         self._close_task_resources(getattr(self, "session_id", None) or "")
+        _phase_done("close_task_resources")
         self._close_active_children(soft=False)
+        _phase_done("close_active_children")
         _quietly(self._drop_shared_client, lambda c: self._close_openai_client(c, reason="agent_close", shared=True))
         self._close_request_clients("agent_close")
         _quietly(self._close_codex_session)
+        _phase_done("close_clients")
         # Free conversation history proactively: callers may still hold the closed agent. The DB-flush
         # settled-prefix snapshot and the streamed-text accumulator are shadow copies of the same transcript;
         # on a closed delegate child they were the only remaining owners, pinning its history in the parent heap.
@@ -972,7 +987,9 @@ class AIAgent(
         self._db_flush_scan_prefix = None
         self._streamed_assistant_text_parts = []
         _quietly(self._trim_process_memory)
+        _phase_done("trim_process_memory")
         _quietly(self._finalize_owned_session_row)
+        _phase_done("finalize_owned_session_row")
 
     # -- close()/release_clients() phases -------------------------------------------------------------
 
