@@ -120,6 +120,7 @@ it('tags a member turn with the model that served it, amber when the session cha
   }
 
   $groupChats.set({ Room: { log, servedBy, watermarks: {}, sessions: {} } })
+
   const { getAllByTestId } = render(
     <GroupChatWorkspace group="Room" members={[{ name: 'builder' }, { name: 'ops' }] as never} />
   )

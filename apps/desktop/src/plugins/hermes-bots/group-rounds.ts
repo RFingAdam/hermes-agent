@@ -44,7 +44,8 @@ import type { Attachment, GroupMember, GroupMessage } from './types'
 //
 // Behavioral model (clean-room): a group conversation is ONE ordered room log
 // owned by the plugin. A user send triggers at most the drive's round ceiling
-// (GROUP_CHAT_MAX_ROUNDS stock; see group-room-policy.ts) of serial round-robin rounds over the member roster — never parallel, no LLM
+// (GROUP_CHAT_MAX_ROUNDS stock; see group-room-policy.ts) of serial
+// round-robin rounds over the member roster — never parallel, no LLM
 // router. Who speaks each round is a deterministic @mention parse since the
 // last user message (mentioned members only, else everyone); whether a member
 // actually speaks is its own turn's choice — replying with exactly "(pass)"
@@ -589,6 +590,7 @@ export async function runGroupChatRounds(
 
   const startEpoch = ($groupChats.get()[group] || {}).epoch || 0
   const isCurrent = () => binding.isLive() && (($groupChats.get()[group] || {}).epoch || 0) === startEpoch
+
   const { autoSummary, maxRounds, maxMessages, toolCapable, wallClockMs, workLoop } = getGroupChatCeilings(
     group,
     members
