@@ -2866,6 +2866,25 @@ def _live_session_payload(
                        ("pending_connection", _pending_connection_request_payload(sid))):
         if value:
             payload[key] = value
+    # What actually SERVED this session, which is not always what it was
+    # configured with. After a provider fallback ``info.model`` still reports
+    # the configured model, so a client showing that reports a reassuring lie:
+    # a session can run start to finish on a fallback provider with nothing on
+    # screen saying so. Usage rows are the record of real calls.
+    try:
+        from tui_gateway.session_workdir import _session_db
+
+        stored_key = _session_lookup_key(session, fallback=sid)
+        with _session_db(session) as usage_db:
+            usage = None
+            if usage_db is not None:
+                usage = usage_db.get_session_usage_summary(stored_key)
+                if usage is None and stored_key != sid:
+                    usage = usage_db.get_session_usage_summary(sid)
+        if usage:
+            payload["usage"] = usage
+    except Exception as exc:  # never let a reporting read break a resume
+        logger.debug("usage summary unavailable for %s: %s", sid, exc)
     return _attach_todo_state(payload, session)
 
 
