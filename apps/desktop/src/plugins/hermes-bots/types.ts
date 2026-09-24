@@ -203,6 +203,9 @@ export interface GroupHold {
 }
 
 export interface GroupChat {
+  /** Per-thread lanes (group-work.ts): thread id → the member key that owns
+   *  it. Only the assignee is dispatched into an assigned thread. */
+  assignments?: Record<string, string>
   /** Whether user text may create sticky member holds. Defaults to true for
    *  rooms written by older builds; the room settings switch can disable it. */
   holdDetection?: boolean

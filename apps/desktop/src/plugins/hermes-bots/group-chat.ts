@@ -1451,6 +1451,7 @@ export function normalizeGroupChatRoomMode(mode: unknown): GroupChatRoomMode | n
 export function groupChatPolicyFields(room: Partial<GroupChat> | null | undefined): Partial<GroupChat> {
   const mode = normalizeGroupChatRoomMode(room?.mode)
   const working = room?.working && typeof room.working === 'object' ? room.working : {}
+  const assignments = room?.assignments && typeof room.assignments === 'object' ? room.assignments : {}
 
   const tokenBudget = Number(room?.tokenBudget)
 
@@ -1458,7 +1459,8 @@ export function groupChatPolicyFields(room: Partial<GroupChat> | null | undefine
     ...(mode ? { mode } : {}),
     ...(room?.tokenBudget !== undefined && Number.isFinite(tokenBudget) ? { tokenBudget } : {}),
     ...(room?.workLoop === false ? { workLoop: false as const } : {}),
-    ...(Object.keys(working).length ? { working } : {})
+    ...(Object.keys(working).length ? { working } : {}),
+    ...(Object.keys(assignments).length ? { assignments } : {})
   }
 }
 

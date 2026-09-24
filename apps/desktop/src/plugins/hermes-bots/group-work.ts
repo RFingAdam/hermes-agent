@@ -143,6 +143,43 @@ export function clearGroupWorkClaim(group: string, memberKey: string) {
   })
 }
 
+/** Per-thread ownership. A thread with an assignee is that member's lane:
+ *  nobody else is dispatched into it, so two members cannot both decide a
+ *  task is theirs. Coordination in chat ("assigning t_123 to @backend") is a
+ *  statement of intent; this is what actually enforces it. */
+export function groupThreadAssignee(group: string, thread: string): null | string {
+  return $groupChats.get()[group]?.assignments?.[thread] || null
+}
+
+/** Assign `thread` to a member key; a falsy key clears it and reopens the thread. */
+export function setGroupThreadAssignee(group: string, thread: string, memberKey: null | string | undefined) {
+  updateGroupChat(group, room => {
+    const assignments = { ...(room.assignments || {}) }
+
+    if (memberKey) {
+      assignments[thread] = memberKey
+    } else {
+      delete assignments[thread]
+    }
+
+    return { ...room, assignments }
+  })
+
+  return memberKey || null
+}
+
+/** Narrow a thread's candidates to its lane. An assignee who is no longer
+ *  seated in the room does not strand the thread: it reopens to everyone. */
+export function filterToGroupThreadLane(group: string, thread: string, members: GroupMember[]): GroupMember[] {
+  const assignee = groupThreadAssignee(group, thread)
+
+  if (!assignee || !members.some(member => groupMemberKey(member) === assignee)) {
+    return members
+  }
+
+  return members.filter(member => groupMemberKey(member) === assignee)
+}
+
 /** Apply one committed member reply to the work loop: "(working)" keeps (or
  *  opens) the member's claim, anything else releases it. A member that has
  *  stopped making progress loses its claim and the room says why. */

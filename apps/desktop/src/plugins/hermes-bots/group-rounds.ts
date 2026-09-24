@@ -31,6 +31,7 @@ import { rejectGroupSlashCommand } from './group-slash'
 import { GROUP_TURN_HARD_CAP_MS, harvestStrandedGroupReply } from './group-turns'
 import {
   clearGroupWorkClaim,
+  filterToGroupThreadLane,
   GROUP_WORK_HARD_TURN_BACKSTOP,
   hasOpenGroupWorkClaims,
   openGroupWorkClaims
@@ -709,12 +710,14 @@ export async function runGroupChatRounds(
       const claimKeys = workLoop ? openGroupWorkClaims(group, thread) : []
       context.claimKeys = new Set(claimKeys)
 
-      const responders = [
+      // An assigned thread is one member's lane: everyone else is skipped for
+      // it, whoever was @mentioned, so parallel bots cannot collide on a task.
+      const responders = filterToGroupThreadLane(group, thread, [
         ...members.filter(member => context.claimKeys.has(groupMemberKey(member))),
         ...rotateGroupSpeakers(resolveGroupResponders(roomLog, members), round).filter(
           member => !context.claimKeys.has(groupMemberKey(member))
         )
-      ].filter((member: GroupMember) => !Object.prototype.hasOwnProperty.call(strandedNow, groupMemberKey(member)))
+      ]).filter((member: GroupMember) => !Object.prototype.hasOwnProperty.call(strandedNow, groupMemberKey(member)))
 
       let spokeThisRound = 0
 
@@ -763,7 +766,9 @@ export async function runGroupChatRounds(
         // one bounded continuation round for exactly those members. If none
         // exist (or the continuation also goes quiet), the room genuinely
         // settled.
-        const pendingKeys = unaddressedGroupMentions(group, members, thread)
+        // A handoff never pulls a non-assignee into an assigned thread either.
+        const laneKeys = new Set(filterToGroupThreadLane(group, thread, members).map(groupMemberKey))
+        const pendingKeys = unaddressedGroupMentions(group, members, thread).filter(key => laneKeys.has(key))
 
         // #94478 review: bound continuation rounds independently of the
         // message cap so a pathological mention chain can't consume the

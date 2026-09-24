@@ -213,6 +213,64 @@ describe('claims', () => {
   })
 })
 
+describe('thread lanes', () => {
+  it('routes an assigned thread to its assignee, not to whoever was mentioned', async () => {
+    const room = await loadRoom()
+    const thread = 't-lanes'
+
+    // builder is mentioned first and sits first in the roster: if the lane
+    // were ignored, builder would answer.
+    room.work.setGroupThreadAssignee('Lanes', thread, 'research')
+    expect(room.work.groupThreadAssignee('Lanes', thread)).toBe('research')
+
+    room.rounds.sendToGroupChat('Lanes', MEMBERS, '@builder @research both look at this', thread)
+    await settle(room, 'Lanes')
+
+    expect(turnsBy(room, 'research')).toHaveLength(1)
+    expect(turnsBy(room, 'builder')).toHaveLength(0)
+  })
+
+  it('keeps a handoff from pulling a non-assignee into the lane', async () => {
+    const room = await loadRoom({
+      turn: ({ profile, session }) => {
+        const done = session.messages.filter(message => message.role === 'assistant').length
+
+        return profile === 'research' && done === 0 ? '@ops can you take the deploy?' : '(pass)'
+      }
+    })
+
+    const thread = 't-handoff'
+    room.work.setGroupThreadAssignee('Lanes', thread, 'research')
+    room.rounds.sendToGroupChat('Lanes', MEMBERS, '@research investigate', thread)
+    await settle(room, 'Lanes')
+
+    expect(turnsBy(room, 'ops')).toHaveLength(0)
+  })
+
+  it('reopens the thread when the assignee is cleared, or is no longer seated', async () => {
+    const room = await loadRoom()
+
+    room.work.setGroupThreadAssignee('Lanes', 't1', 'builder')
+    room.work.setGroupThreadAssignee('Lanes', 't1', null)
+    expect(room.work.groupThreadAssignee('Lanes', 't1')).toBeNull()
+
+    room.rounds.sendToGroupChat('Lanes', MEMBERS, '@research over to you', 't1')
+    await settle(room, 'Lanes')
+    expect(turnsBy(room, 'research')).toHaveLength(1)
+
+    room.work.setGroupThreadAssignee('Lanes', 't2', 'departed-bot')
+    expect(room.work.filterToGroupThreadLane('Lanes', 't2', MEMBERS)).toEqual(MEMBERS)
+  })
+
+  it('persists lanes with the room record', async () => {
+    const { chat, work } = await loadRoom()
+
+    work.setGroupThreadAssignee('Lanes', 't1', 'ops')
+
+    expect(chat.durableGroupChatRooms().Lanes.assignments).toEqual({ t1: 'ops' })
+  })
+})
+
 function thread(room: Room, group: string) {
   return room.chat.$groupChats.get()[group]?.log[0]?.thread || ''
 }
