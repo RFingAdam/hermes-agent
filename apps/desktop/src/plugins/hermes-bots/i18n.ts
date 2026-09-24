@@ -185,6 +185,11 @@ type BotsMessages = {
   }
   /** Group chats: the room, its composer, threads and activity feed. */
   group: {
+    /** The room header's status line: what, if anything, needs the user. */
+    statusToReview: (count: number) => string
+    statusBlocked: (count: number) => string
+    statusWorking: (count: number) => string
+    statusSummaryHint: string
     /** The serving-route tag beside a member's turn (session.resume `usage`). */
     servedByHint: (model: string, provider: string) => string
     servedByChangedHint: (model: string) => string
@@ -475,6 +480,10 @@ const en: BotsMessages = {
     generating: 'Generating…'
   },
   group: {
+    statusToReview: count => `${count} to review`,
+    statusBlocked: count => `${count} blocked`,
+    statusWorking: count => `${count} working`,
+    statusSummaryHint: 'Reported by each bot at the end of its turn',
     servedByHint: (model, provider) =>
       `Served by ${model}${provider ? ` (${provider})` : ''} — the most recent route for this member`,
     servedByChangedHint: model =>
@@ -760,6 +769,10 @@ const ja: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    statusToReview: count => `レビュー待ち ${count}`,
+    statusBlocked: count => `ブロック中 ${count}`,
+    statusWorking: count => `作業中 ${count}`,
+    statusSummaryHint: '各ボットがターンの最後に報告した状態です',
     servedByHint: (model, provider) =>
       `応答モデル: ${model}${provider ? `（${provider}）` : ''} — このメンバーの直近のルート`,
     servedByChangedHint: model =>
@@ -1040,6 +1053,10 @@ const zh: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    statusToReview: count => `${count} 个待审阅`,
+    statusBlocked: count => `${count} 个受阻`,
+    statusWorking: count => `${count} 个进行中`,
+    statusSummaryHint: '由每个机器人在其回合结束时报告',
     servedByHint: (model, provider) => `由 ${model}${provider ? `（${provider}）` : ''} 响应 — 该成员最近使用的路由`,
     servedByChangedHint: model => `${model} — 此会话已由多个模型响应；并非只有配置的模型在回答`,
     workLoopOn: '工作循环已开启 — 机器人会完成任务',
@@ -1315,6 +1332,10 @@ const zhHant: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    statusToReview: count => `${count} 個待審閱`,
+    statusBlocked: count => `${count} 個受阻`,
+    statusWorking: count => `${count} 個進行中`,
+    statusSummaryHint: '由每個機器人在其回合結束時回報',
     servedByHint: (model, provider) => `由 ${model}${provider ? `（${provider}）` : ''} 回應 — 此成員最近使用的路由`,
     servedByChangedHint: model => `${model} — 此工作階段已由多個模型回應；並非只有設定的模型在回答`,
     workLoopOn: '工作循環已開啟 — 機器人會完成任務',

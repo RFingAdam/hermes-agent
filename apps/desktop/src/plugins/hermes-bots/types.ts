@@ -197,6 +197,16 @@ export interface GroupWorkClaim {
   turns: number
 }
 
+/** Where a member stands on its work (group-work.ts), derived from the turn
+ *  intent the drive already parses. */
+export type GroupMemberState = 'blocked' | 'idle' | 'review' | 'working'
+
+export interface GroupMemberStatus {
+  at: number
+  state: GroupMemberState
+  thread: null | string
+}
+
 export interface GroupHold {
   at?: number
   noted?: boolean
@@ -231,6 +241,8 @@ export interface GroupChat {
   image?: null | string
   log: GroupMessage[]
   members?: GroupMember[]
+  /** Per-member work status by member key, persisted with the room. */
+  memberStatus?: Record<string, GroupMemberStatus>
   /** Per-room preset; overrides the install-wide ceilings when set. */
   mode?: GroupChatRoomMode
   /** Explicit per-drive token ceiling; 0 or less disables it

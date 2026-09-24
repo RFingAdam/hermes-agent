@@ -189,7 +189,7 @@ export function buildGroupChatTurnPrompt({
   if (workLoop) {
     rules.push(
       '- If you take on a task, work it to completion across turns instead of stopping after one message. End each turn that still has work left with exactly "(working)" on its own final line to keep the floor - you will be given another turn.',
-      '- When the task is finished or you are stuck, end with "(done)" or "(blocked)" on its own final line and include your report:',
+      '- When the task is finished end with "(done)"; when you are stuck end with "(blocked)". They are different states and the room reports them separately - do not use (done) for work you could not finish. Include your report:',
       '  **Done** or **Blocked** followed by one line of outcome, then "- Did:", "- Next:", and "- Blockers:" (write "none" where it does not apply).',
       '- Nobody will cut you off mid-task, so do not rush or pad. Repeating yourself with no new progress releases the claim, so only say "(working)" when you actually advanced something.'
     )

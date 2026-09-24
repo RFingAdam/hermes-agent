@@ -1,7 +1,9 @@
 /**
  * Room-header controls for the per-room Bot Mode policy: the preset menu
- * (build / decide / standing) and the work-loop switch. The policy itself
- * lives in group-room-policy.ts and group-work.ts; this is only its chrome.
+ * (build / decide / standing), the work-loop switch, and the status line
+ * that says whether any of the room's work is waiting on the user. The
+ * policy itself lives in group-room-policy.ts and group-work.ts; this is
+ * only its chrome.
  */
 import {
   Button,
@@ -18,7 +20,7 @@ import {
 
 import { $groupChats, normalizeGroupChatRoomMode } from './group-chat'
 import { getGroupChatCeilings, setGroupChatRoomMode } from './group-room-policy'
-import { groupChatWorkLoopEnabled, setGroupChatWorkLoop } from './group-work'
+import { groupChatWorkLoopEnabled, groupStatusCounts, setGroupChatWorkLoop } from './group-work'
 import { useBots } from './i18n'
 import type { GroupChatRoomMode, GroupMember } from './types'
 
@@ -107,5 +109,40 @@ export function GroupRoomModeMenu({ group, members }: GroupRoomModeMenuProps) {
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  )
+}
+
+/** "N to review, M blocked, K working": six bots produce a wall of text, and
+ *  this is the line that says whether any of it needs the user. Amber for
+ *  blocked, accent for review, and nothing at all while the room is quiet. */
+export function GroupRoomStatusSummary({ group }: { group: string }) {
+  const b = useBots()
+  useValue($groupChats)
+  const counts = groupStatusCounts(group)
+
+  const parts = [
+    counts.review ? { key: 'review', text: b.group.statusToReview(counts.review), tone: 'text-(--ui-accent)' } : null,
+    counts.blocked
+      ? { key: 'blocked', text: b.group.statusBlocked(counts.blocked), tone: 'text-amber-600 dark:text-amber-300' }
+      : null,
+    counts.working
+      ? { key: 'working', text: b.group.statusWorking(counts.working), tone: 'text-(--ui-text-tertiary)' }
+      : null
+  ].filter(part => part !== null)
+
+  if (!parts.length) {
+    return null
+  }
+
+  return (
+    <Tip label={b.group.statusSummaryHint}>
+      <span className="flex shrink-0 items-center gap-1.5 text-[0.65rem]" data-testid="group-status-summary">
+        {parts.map(part => (
+          <span className={part.tone} key={part.key}>
+            {part.text}
+          </span>
+        ))}
+      </span>
+    </Tip>
   )
 }

@@ -129,3 +129,34 @@ it('tags a member turn with the model that served it, amber when the session cha
     ['claude-sonnet-5', undefined]
   ])
 })
+
+it('says in the header what needs the user, and nothing while the room is quiet', async () => {
+  Element.prototype.scrollIntoView = vi.fn()
+  const { $groupChats } = await import('./group-chat')
+  const { GroupChatWorkspace } = await import('./group-chat-view')
+  const members = [{ name: 'builder' }, { name: 'ops' }, { name: 'research' }] as never
+
+  $groupChats.set({
+    Room: {
+      log: [],
+      memberStatus: {
+        builder: { at: 1, state: 'review', thread: 'a' },
+        ops: { at: 1, state: 'blocked', thread: 'a' },
+        research: { at: 1, state: 'idle', thread: 'a' }
+      },
+      watermarks: {},
+      sessions: {}
+    }
+  })
+  const { getByTestId, unmount } = render(<GroupChatWorkspace group="Room" members={members} />)
+
+  expect(getByTestId('group-status-summary').textContent).toBe(
+    `${translateBots('group.statusToReview', 1)}${translateBots('group.statusBlocked', 1)}`
+  )
+  unmount()
+
+  $groupChats.set({ Quiet: { log: [], watermarks: {}, sessions: {} } })
+  const { queryByTestId } = render(<GroupChatWorkspace group="Quiet" members={members} />)
+
+  expect(queryByTestId('group-status-summary')).toBeNull()
+})

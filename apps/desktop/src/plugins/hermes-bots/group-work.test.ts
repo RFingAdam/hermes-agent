@@ -75,7 +75,7 @@ describe('turn intent', () => {
     expect(work.groupTurnIntent('')).toBe('pass')
     expect(work.groupTurnIntent('pulled the branch\n(working)')).toBe('working')
     expect(work.groupTurnIntent('**Done** shipped it\n- Did: x\n(done)')).toBe('done')
-    expect(work.groupTurnIntent('cannot reach the box\n(blocked)')).toBe('done')
+    expect(work.groupTurnIntent('cannot reach the box\n(blocked)')).toBe('blocked')
     expect(work.groupTurnIntent('(working) on it, more later')).toBe('reply')
     expect(work.groupTurnIntent('just a normal message')).toBe('reply')
   })
@@ -268,6 +268,58 @@ describe('thread lanes', () => {
     work.setGroupThreadAssignee('Lanes', 't1', 'ops')
 
     expect(chat.durableGroupChatRooms().Lanes.assignments).toEqual({ t1: 'ops' })
+  })
+})
+
+describe('member status', () => {
+  const finishWith = (reply: string) => ({
+    turn: ({ profile }: { profile: string }) => (profile === 'builder' ? reply : '(pass)')
+  })
+
+  it('reports a finished turn as waiting on review', async () => {
+    const room = await loadRoom(finishWith('**Done** shipped it\n- Did: x\n- Next: none\n- Blockers: none\n(done)'))
+
+    room.rounds.sendToGroupChat('Status', MEMBERS, '@builder go')
+    await settle(room, 'Status')
+
+    expect(room.work.groupStatusCounts('Status')).toMatchObject({ review: 1, blocked: 0, working: 0 })
+  })
+
+  it('counts a blocked turn apart from a finished one', async () => {
+    const room = await loadRoom(finishWith('**Blocked** cannot reach QA\n- Blockers: host unreachable\n(blocked)'))
+
+    room.rounds.sendToGroupChat('Status', MEMBERS, '@builder go')
+    await settle(room, 'Status')
+
+    expect(room.work.groupStatusCounts('Status')).toMatchObject({ blocked: 1, review: 0 })
+  })
+
+  it('marks a member that stalled on "(working)" as blocked, not working', async () => {
+    const room = await loadRoom(finishWith('still compiling\n(working)'))
+
+    room.rounds.sendToGroupChat('Status', MEMBERS, '@builder build it')
+    await settle(room, 'Status')
+
+    expect(room.work.groupStatusCounts('Status')).toMatchObject({ blocked: 1, working: 0 })
+  })
+
+  it('tells members (done) and (blocked) are different states', async () => {
+    const room = await loadRoom()
+
+    room.rounds.sendToGroupChat('Status', MEMBERS, '@builder go')
+    await settle(room, 'Status')
+
+    expect(turnsBy(room, 'builder')[0].prompt).toContain('do not use (done) for work you could not finish')
+  })
+
+  it('persists status with the room and rejects unknown states', async () => {
+    const { chat, work } = await loadRoom()
+
+    work.setGroupMemberStatus('Status', 'ops', 'review', 't1')
+
+    expect(chat.durableGroupChatRooms().Status.memberStatus?.ops).toMatchObject({ state: 'review', thread: 't1' })
+    expect(work.setGroupMemberStatus('Status', 'ops', 'bogus' as never, 't1')).toBeNull()
+    expect(chat.$groupChats.get().Status.memberStatus?.ops.state).toBe('review')
   })
 })
 

@@ -24,13 +24,15 @@ import { recordGroupActivity } from './group-activity'
 import { $groupChats, appendGroupChatEntry, updateGroupChat } from './group-chat'
 import { groupMemberKey } from './group-membership'
 import { isGroupPassText } from './group-turns'
-import type { GroupChat, GroupMember } from './types'
+import type { GroupChat, GroupMember, GroupMemberState } from './types'
 
 export const GROUP_WORK_NO_PROGRESS_LIMIT = 5
 export const GROUP_WORK_HARD_TURN_BACKSTOP = 250
 
-/** What a finished turn said about its own work. */
-export type GroupTurnIntent = 'done' | 'pass' | 'reply' | 'working'
+/** What a finished turn said about its own work. (done) and (blocked) are
+ *  distinct: merging them reported work a member could not finish as
+ *  finished. */
+export type GroupTurnIntent = 'blocked' | 'done' | 'pass' | 'reply' | 'working'
 
 export function groupTurnIntent(text: unknown): GroupTurnIntent {
   const trimmed = String(text || '').trim()
@@ -43,8 +45,12 @@ export function groupTurnIntent(text: unknown): GroupTurnIntent {
     return 'working'
   }
 
-  if (/\(\s*(done|blocked)\s*\)\.?$/i.test(trimmed)) {
+  if (/\(\s*done\s*\)\.?$/i.test(trimmed)) {
     return 'done'
+  }
+
+  if (/\(\s*blocked\s*\)\.?$/i.test(trimmed)) {
+    return 'blocked'
   }
 
   return 'reply'
@@ -180,12 +186,55 @@ export function filterToGroupThreadLane(group: string, thread: string, members: 
   return members.filter(member => groupMemberKey(member) === assignee)
 }
 
+export const GROUP_MEMBER_STATES: readonly GroupMemberState[] = Object.freeze(['working', 'review', 'blocked', 'idle'])
+
+/** A turn's status: mid-task, finished and waiting on a review, stuck, or quiet. */
+export function groupMemberStateForIntent(intent: GroupTurnIntent): GroupMemberState {
+  return intent === 'working' ? 'working' : intent === 'done' ? 'review' : intent === 'blocked' ? 'blocked' : 'idle'
+}
+
+/** Where a member stands, so the room is scannable without reading every
+ *  turn. Derived from the signal the drive already parses rather than a
+ *  second protocol the model has to remember. Unknown states are rejected. */
+export function setGroupMemberStatus(
+  group: string,
+  memberKey: string,
+  state: GroupMemberState,
+  thread?: null | string
+): GroupMemberState | null {
+  if (!GROUP_MEMBER_STATES.includes(state)) {
+    return null
+  }
+
+  updateGroupChat(group, room => ({
+    ...room,
+    memberStatus: { ...(room.memberStatus || {}), [memberKey]: { state, thread: thread || null, at: Date.now() } }
+  }))
+
+  return state
+}
+
+/** Header counts: members mid-task, waiting on a review, or stuck. */
+export function groupStatusCounts(group: string): Record<GroupMemberState, number> {
+  const counts: Record<GroupMemberState, number> = { working: 0, review: 0, blocked: 0, idle: 0 }
+
+  for (const entry of Object.values($groupChats.get()[group]?.memberStatus || {})) {
+    if (entry && Object.prototype.hasOwnProperty.call(counts, entry.state)) {
+      counts[entry.state] += 1
+    }
+  }
+
+  return counts
+}
+
 /** Apply one committed member reply to the work loop: "(working)" keeps (or
  *  opens) the member's claim, anything else releases it. A member that has
  *  stopped making progress loses its claim and the room says why. */
 export function applyGroupWorkTurn(group: string, thread: string, member: GroupMember, reply: string) {
   const memberKey = groupMemberKey(member)
   const intent = groupTurnIntent(reply)
+
+  setGroupMemberStatus(group, memberKey, groupMemberStateForIntent(intent), thread)
 
   if (intent !== 'working') {
     clearGroupWorkClaim(group, memberKey)
@@ -201,6 +250,8 @@ export function applyGroupWorkTurn(group: string, thread: string, member: GroupM
       thread
     )
     recordGroupActivity(group, { kind: 'stalled', member: memberKey, thread })
+    // It said "(working)", but it is not: a stalled member needs the user.
+    setGroupMemberStatus(group, memberKey, 'blocked', thread)
   }
 
   return intent

@@ -100,7 +100,7 @@ import {
   updateGroupComposerDraft
 } from './group-panes'
 import type { GroupComposerDraft, GroupDraftSetter } from './group-panes'
-import { GroupRoomModeMenu } from './group-room-controls'
+import { GroupRoomModeMenu, GroupRoomStatusSummary } from './group-room-controls'
 import { groupReplyMentionTag, sendToGroupChat, stopGroupThread } from './group-rounds'
 import { clearGroupClarify, renameGroupClarify } from './group-turns'
 import { botsText, useBots } from './i18n'
@@ -789,6 +789,7 @@ export function GroupChatWorkspace({ group, members, onBack, visible = true }: G
             : b.group.memberCount(members.length)}
         </span>
       </Tip>
+      <GroupRoomStatusSummary group={group} />
       <GroupRoomModeMenu group={group} members={members} />
       <Tip label={b.group.settingsHint(group)}>
         <Button
