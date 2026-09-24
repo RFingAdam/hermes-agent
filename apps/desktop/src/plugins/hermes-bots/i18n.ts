@@ -185,6 +185,20 @@ type BotsMessages = {
   }
   /** Group chats: the room, its composer, threads and activity feed. */
   group: {
+    /** Per-room Bot Mode presets (group-room-policy.ts): the header menu. */
+    roomModeDefault: string
+    roomModeBuild: string
+    roomModeDecide: string
+    roomModeStanding: string
+    roomModeDefaultItem: string
+    roomModeBuildItem: string
+    roomModeDecideItem: string
+    roomModeStandingItem: string
+    roomModeLabel: (mode: string) => string
+    roomModeHint: (mode: string, rounds: number, messages: number, minutes: number) => string
+    roomModeUnsetHint: string
+    /** Speaker label for a note the room engine posts itself. */
+    systemNote: string
     newTitle: string
     manageDesc: string
     manageTitle: string
@@ -455,6 +469,20 @@ const en: BotsMessages = {
     generating: 'Generating…'
   },
   group: {
+    roomModeDefault: 'Default',
+    roomModeBuild: 'Build',
+    roomModeDecide: 'Decide',
+    roomModeStanding: 'Standing',
+    roomModeDefaultItem: 'Default (install-wide rounds)',
+    roomModeBuildItem: 'Build — long, tool-capable',
+    roomModeDecideItem: 'Decide — tight, auto-summary',
+    roomModeStandingItem: 'Standing — moderate coordination',
+    roomModeLabel: mode => `Room mode: ${mode}`,
+    roomModeHint: (mode, rounds, messages, minutes) =>
+      `${mode} mode — ${rounds} rounds / ~${messages} messages / ${minutes} min wall-clock. Click to change.`,
+    roomModeUnsetHint:
+      'Room mode unset — uses the install-wide rounds setting. Click to set build / decide / standing.',
+    systemNote: 'System',
     newTitle: 'New group chat',
     manageDesc: 'A bot can join multiple group chats. Memberships sync to every machine.',
     manageTitle: 'Manage groups',
@@ -720,6 +748,19 @@ const ja: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    roomModeDefault: 'デフォルト',
+    roomModeBuild: 'ビルド',
+    roomModeDecide: '決定',
+    roomModeStanding: '常設',
+    roomModeDefaultItem: 'デフォルト（全体のラウンド設定）',
+    roomModeBuildItem: 'ビルド — 長時間、ツール使用可',
+    roomModeDecideItem: '決定 — 短時間、自動要約',
+    roomModeStandingItem: '常設 — 中程度の連携',
+    roomModeLabel: mode => `ルームモード: ${mode}`,
+    roomModeHint: (mode, rounds, messages, minutes) =>
+      `${mode}モード — ${rounds} ラウンド / 約 ${messages} メッセージ / ${minutes} 分の時間上限。クリックで変更。`,
+    roomModeUnsetHint: 'ルームモード未設定 — 全体のラウンド設定を使います。クリックでビルド / 決定 / 常設を選択。',
+    systemNote: 'システム',
     newTitle: '新しいグループチャット',
     manageDesc: 'ボットは複数のグループチャットに参加できます。メンバーシップはすべてのマシンに同期されます。',
     manageTitle: 'グループを管理',
@@ -981,6 +1022,19 @@ const zh: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    roomModeDefault: '默认',
+    roomModeBuild: '构建',
+    roomModeDecide: '决策',
+    roomModeStanding: '常驻',
+    roomModeDefaultItem: '默认（全局轮次设置）',
+    roomModeBuildItem: '构建 — 长时运行，可用工具',
+    roomModeDecideItem: '决策 — 紧凑，自动总结',
+    roomModeStandingItem: '常驻 — 适度协作',
+    roomModeLabel: mode => `房间模式：${mode}`,
+    roomModeHint: (mode, rounds, messages, minutes) =>
+      `${mode}模式 — ${rounds} 轮 / 约 ${messages} 条消息 / ${minutes} 分钟时限。点击更改。`,
+    roomModeUnsetHint: '未设置房间模式 — 使用全局轮次设置。点击设为构建 / 决策 / 常驻。',
+    systemNote: '系统',
     newTitle: '新建群聊',
     manageDesc: '一个机器人可以加入多个群聊。成员关系会同步到每台设备。',
     manageTitle: '管理群组',
@@ -1239,6 +1293,19 @@ const zhHant: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    roomModeDefault: '預設',
+    roomModeBuild: '建置',
+    roomModeDecide: '決策',
+    roomModeStanding: '常駐',
+    roomModeDefaultItem: '預設（全域輪次設定）',
+    roomModeBuildItem: '建置 — 長時執行，可用工具',
+    roomModeDecideItem: '決策 — 精簡，自動摘要',
+    roomModeStandingItem: '常駐 — 適度協作',
+    roomModeLabel: mode => `房間模式：${mode}`,
+    roomModeHint: (mode, rounds, messages, minutes) =>
+      `${mode}模式 — ${rounds} 輪 / 約 ${messages} 則訊息 / ${minutes} 分鐘時限。點擊變更。`,
+    roomModeUnsetHint: '未設定房間模式 — 使用全域輪次設定。點擊設為建置 / 決策 / 常駐。',
+    systemNote: '系統',
     newTitle: '新增群組聊天',
     manageDesc: '一個機器人可以加入多個群組聊天。成員關係會同步到每台裝置。',
     manageTitle: '管理群組',

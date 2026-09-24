@@ -55,6 +55,7 @@ import {
   $groupChats,
   $groupChatWorkspace,
   assignLegacyThreads,
+  groupChatPolicyFields,
   handleSessionsGatewayTransition,
   hydrateGroupChatTombstones,
   pullGroupChatServerState,
@@ -310,6 +311,7 @@ export default {
                   pinned: Boolean(room.pinned),
                   sectionId: room.sectionId ?? null,
                   syncRevision: Math.max(0, Number(room.syncRevision || 0)),
+                  ...groupChatPolicyFields(room),
                   epoch: 0,
                   running: false
                 }

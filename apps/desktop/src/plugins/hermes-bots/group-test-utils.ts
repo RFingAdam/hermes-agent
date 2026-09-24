@@ -454,6 +454,13 @@ export async function pluginSdkMock(host: Record<string, unknown>) {
     blobatarSvg: undefined,
     computed: nanostores.computed,
     createBudgetedLoop: undefined,
+    // Room-header menus (group-room-controls.tsx): closed by default, so the
+    // trigger renders and the item list does not.
+    DropdownMenu: ({ children }: { children?: unknown }) => children ?? null,
+    DropdownMenuContent: () => null,
+    DropdownMenuItem: () => null,
+    DropdownMenuSeparator: () => null,
+    DropdownMenuTrigger: ({ children }: { children?: unknown }) => children ?? null,
     host,
     CapabilitiesView: undefined,
     MessageTextContent: undefined,

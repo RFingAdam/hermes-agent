@@ -50,6 +50,12 @@ export function formatGroupChatLine(entry: GroupMessage, viewer: GroupChatLineVi
     return `${entry.from.name || 'User'} (user): ${entry.text}${attached}`
   }
 
+  // The room engine's own notes (a ceiling summary, a released claim) are
+  // neither a peer nor the user.
+  if (entry.from.kind === 'system') {
+    return `[system] ${entry.text}`
+  }
+
   const suffix = isGroupChatSelf(entry.from, viewer) ? ' (you)' : ''
   // Cross-connection speakers carry their device so same-named agents on
   // two machines stay tellable apart in every member's transcript.
@@ -140,6 +146,8 @@ interface GroupChatTurnPromptInput {
   deltaLines: string[]
   groupName: string
   members: GroupMember[]
+  /** False (a chat-only room preset) forbids tool use for this turn. */
+  toolCapable?: boolean
   viewer: GroupMember
 }
 
@@ -150,7 +158,13 @@ export const GROUP_PROMPT_HEADER_PREFIX = '[Group chat: "'
 /** The full per-turn payload for one member: participation rules + the room
  *  delta. Rules travel in the turn payload (not SOUL) so every existing bot
  *  can join a group chat without a profile migration. */
-export function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines }: GroupChatTurnPromptInput) {
+export function buildGroupChatTurnPrompt({
+  groupName,
+  members,
+  viewer,
+  deltaLines,
+  toolCapable = true
+}: GroupChatTurnPromptInput) {
   const viewerKey = groupMemberKey(viewer)
   const peers = members.filter(m => groupMemberKey(m) !== viewerKey)
 
@@ -162,6 +176,19 @@ export function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLine
     })
     .join(', ')
 
+  const rules = [
+    '- Reply with ONE conversational message ONLY if you have something new worth adding: build on what was just said, claim or hand off work, answer a question aimed at you, or report a real result. Keep chatter short (1-3 sentences) — but when you are delivering a result, an answer the user asked for, or substantive work, give it at full quality and length; never thin out real content to fit the room.',
+    '- If you have nothing new to add, reply with exactly "(pass)". Passing is good — it lets the conversation settle.',
+    '- Mention a teammate as @name to pull them in; mention @user only for a judgment call or a result the user needs. Do not repeat points already made.',
+    '- Never reveal content from your private 1:1 chats. Your reply text goes to the room verbatim — no preamble, no meta-commentary.'
+  ]
+
+  if (!toolCapable) {
+    rules.push(
+      '- This room is chat-only (decide/standing mode): do NOT call tools, run shell/terminal commands, edit files, open browsers, or create tickets. Discuss and decide in text only.'
+    )
+  }
+
   return [
     `${GROUP_PROMPT_HEADER_PREFIX}${groupName}"] You are @${botMentionTag(viewer)}, one participant in a group chat with ${peerNames || 'no one else yet'} and the user.`,
     '',
@@ -169,9 +196,6 @@ export function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLine
     ...deltaLines.map(line => `  ${line}`),
     '',
     'Rules for this room:',
-    '- Reply with ONE conversational message ONLY if you have something new worth adding: build on what was just said, claim or hand off work, answer a question aimed at you, or report a real result. Keep chatter short (1-3 sentences) — but when you are delivering a result, an answer the user asked for, or substantive work, give it at full quality and length; never thin out real content to fit the room.',
-    '- If you have nothing new to add, reply with exactly "(pass)". Passing is good — it lets the conversation settle.',
-    '- Mention a teammate as @name to pull them in; mention @user only for a judgment call or a result the user needs. Do not repeat points already made.',
-    '- Never reveal content from your private 1:1 chats. Your reply text goes to the room verbatim — no preamble, no meta-commentary.'
+    ...rules
   ].join('\n')
 }

@@ -84,3 +84,22 @@ it('renders member replies through the shell message renderer, resolving media o
     ['MEDIA:/tmp/remote.png', 'false']
   ])
 })
+
+it('renders a room note as a plain label with no speaker controls, and shows the room preset', async () => {
+  Element.prototype.scrollIntoView = vi.fn()
+  const { $groupChats } = await import('./group-chat')
+  const { GroupChatWorkspace } = await import('./group-chat-view')
+
+  const log = [
+    { id: 'u1', thread: 'a', from: { kind: 'user' as const, name: 'You' }, text: 'Pick one', at: 1 },
+    { id: 's1', thread: 'a', from: { kind: 'system' as const, name: 'Summary' }, text: 'drive capped', at: 2 }
+  ]
+
+  $groupChats.set({ Room: { log, mode: 'decide', watermarks: {}, sessions: {} } })
+  const { getByText } = render(<GroupChatWorkspace group="Room" members={[{ name: 'builder' }] as never} />)
+
+  // The engine's own note is a static label, not the click-to-reveal handle button a member gets.
+  expect(getByText('Summary').closest('button')).toBeNull()
+  // The header's preset menu names the room's mode.
+  expect(getByText(translateBots('group.roomModeDecide')).closest('button')).not.toBeNull()
+})

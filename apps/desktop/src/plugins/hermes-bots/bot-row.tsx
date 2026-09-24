@@ -502,7 +502,7 @@ export function GroupRow({ active, group, members, needsYou, onOpen, onDisband, 
   )
 
   const preview = last
-    ? `${last.from?.kind === 'user' ? b.group.you : `@${lastHandle}`}: ${stripPreviewMarkdown(last.text) || '…'}`
+    ? `${last.from?.kind === 'user' ? b.group.you : last.from?.kind === 'system' ? lastFrom : `@${lastHandle}`}: ${stripPreviewMarkdown(last.text) || '…'}`
     : b.group.memberCount(members.length)
 
   const availableMembers = members.filter(member => botSourceStatus(member).available).length

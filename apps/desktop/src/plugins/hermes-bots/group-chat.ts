@@ -19,6 +19,7 @@ import { getPluginCtx } from './shared'
 import type {
   Attachment,
   GroupChat,
+  GroupChatRoomMode,
   GroupHold,
   GroupMember,
   GroupMessage,
@@ -323,7 +324,9 @@ export function groupChatSyncSnapshot(
             }
           : {}),
         from: {
-          kind: entry?.from?.kind === 'member' ? 'member' : 'user',
+          // A room-engine note stays a note on every surface; mapping it to
+          // `user` would re-drive the room as if the reader had spoken.
+          kind: entry?.from?.kind === 'member' || entry?.from?.kind === 'system' ? entry.from.kind : 'user',
           name: String(entry?.from?.name || (entry?.from?.kind === 'member' ? 'Bot' : 'You')).slice(0, 128),
           ...(entry?.from?.source
             ? {
@@ -925,7 +928,8 @@ export function durableGroupChatRooms(all: Record<string, GroupChat> = $groupCha
       pinned: room.pinned,
       // Sidebar filing (user-sections) is room-local; keep it across sync.
       sectionId: room.sectionId ?? null,
-      syncRevision: Math.max(0, Number(room.syncRevision || 0))
+      syncRevision: Math.max(0, Number(room.syncRevision || 0)),
+      ...groupChatPolicyFields(room)
     }
   }
 
@@ -1426,6 +1430,32 @@ export const GROUP_CHAT_LOG_RETAIN = GROUP_CHAT_HISTORY_LIMIT * 2
 export const GROUP_CHAT_LOG_RETAIN_CHARS = GROUP_CHAT_HISTORY_CHARS * 8
 export const GROUP_CHAT_MAX_MEMBERS = 6
 
+/** Per-room presets, in menu order (group-room-policy.ts owns their ceilings). */
+export const GROUP_CHAT_ROOM_MODES: readonly GroupChatRoomMode[] = Object.freeze(['build', 'decide', 'standing'])
+
+/** A stored room mode, or null for anything unknown (unset = install-wide ceilings). */
+export function normalizeGroupChatRoomMode(mode: unknown): GroupChatRoomMode | null {
+  if (typeof mode !== 'string') {
+    return null
+  }
+
+  const key = mode.trim().toLowerCase()
+
+  return (GROUP_CHAT_ROOM_MODES as readonly string[]).includes(key) ? (key as GroupChatRoomMode) : null
+}
+
+/** The per-room Bot Mode policy every durable serializer carries — the
+ *  updateGroupChat write, durableGroupChatRooms and the plugin hydrate — so
+ *  none of the three can drop a field the others keep. Absent stays absent.
+ *  Local like `sectionId`: deliberately not part of the gateway projection. */
+export function groupChatPolicyFields(room: Partial<GroupChat> | null | undefined): Partial<GroupChat> {
+  const mode = normalizeGroupChatRoomMode(room?.mode)
+
+  return {
+    ...(mode ? { mode } : {})
+  }
+}
+
 /** Transcript form of a room speaker's identity. Friendly identity wins:
  *  a Bot Mode title or a core profile display_name (e.g. default renamed to
  *  "Lucy") labels the speaker everywhere this helper feeds — the "X is
@@ -1638,7 +1668,8 @@ export function updateGroupChat(
         pinned: room.pinned,
         // Sidebar filing (user-sections) is room-local; keep it durable.
         sectionId: room.sectionId ?? null,
-        syncRevision: Math.max(0, Number(room.syncRevision || 0))
+        syncRevision: Math.max(0, Number(room.syncRevision || 0)),
+        ...groupChatPolicyFields(room)
       }
     }
 

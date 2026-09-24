@@ -26,6 +26,8 @@ export interface GroupRoundMemberContext {
   failedMembers?: Set<string>
   /** This drive's message ceiling; GROUP_CHAT_MAX_MESSAGES when absent. */
   maxMessages?: number
+  /** False = a chat-only room preset; the turn prompt forbids tools. */
+  toolCapable?: boolean
 }
 
 /** #93129: a held member's skip must consume its delta exactly once —
@@ -125,7 +127,8 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
     groupName: context.group,
     members,
     viewer: member,
-    deltaLines: formatGroupDeltaLines(visibleDelta, member, context.group)
+    deltaLines: formatGroupDeltaLines(visibleDelta, member, context.group),
+    toolCapable: context.toolCapable !== false
   })
 
   // Images riding this delta (user attachments — member entries don't

@@ -452,7 +452,7 @@ export function groupTranscriptSpeakerMeta(
   members: RosterRow[],
   allMeta: Record<string, BotMeta>
 ): BotMeta | null | undefined {
-  if (!entry?.from || entry.from.kind === 'user') {
+  if (!entry?.from || entry.from.kind === 'user' || entry.from.kind === 'system') {
     return null
   }
 

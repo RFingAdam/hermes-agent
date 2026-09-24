@@ -155,7 +155,9 @@ export interface Attachment {
 }
 
 export interface GroupMessageAuthor {
-  kind: 'member' | 'user'
+  /** `system` = a note the room engine posts itself (a ceiling summary, a
+   *  released work claim); never a member turn or a user send. */
+  kind: 'member' | 'system' | 'user'
   name: string
   /** Connection label (`connectionLabel || connectionId`) — this Desktop's
    *  name for the speaker's connection; display-only. */
@@ -180,6 +182,10 @@ export interface GroupMessage {
   truncated?: boolean
 }
 
+/** Per-room Bot Mode preset (group-room-policy.ts). Unset = the install-wide
+ *  stock / "Extended rounds" ceilings. */
+export type GroupChatRoomMode = 'build' | 'decide' | 'standing'
+
 export interface GroupHold {
   at?: number
   noted?: boolean
@@ -198,6 +204,8 @@ export interface GroupChat {
   image?: null | string
   log: GroupMessage[]
   members?: GroupMember[]
+  /** Per-room preset; overrides the install-wide ceilings when set. */
+  mode?: GroupChatRoomMode
   /** Immutable identity, so a rename doesn't fork the room. */
   roomId?: null | string
   running?: boolean

@@ -25,7 +25,7 @@ import {
   groupSessionKey,
   hasThreadScopedGroupSession
 } from './group-membership'
-import { getGroupChatCeilings } from './group-room-policy'
+import { getGroupChatCeilings, summarizeGroupChat } from './group-room-policy'
 import { runGroupContinuationMembers, runGroupRoundMember } from './group-round-members'
 import { rejectGroupSlashCommand } from './group-slash'
 import { GROUP_TURN_HARD_CAP_MS, harvestStrandedGroupReply } from './group-turns'
@@ -582,7 +582,7 @@ export async function runGroupChatRounds(
 
   const startEpoch = ($groupChats.get()[group] || {}).epoch || 0
   const isCurrent = () => binding.isLive() && (($groupChats.get()[group] || {}).epoch || 0) === startEpoch
-  const { maxRounds, maxMessages, wallClockMs } = getGroupChatCeilings()
+  const { autoSummary, maxRounds, maxMessages, toolCapable, wallClockMs } = getGroupChatCeilings(group, members)
   const deadline = wallClockMs ? Date.now() + wallClockMs : null
   const pastDeadline = () => deadline !== null && Date.now() >= deadline
 
@@ -596,7 +596,8 @@ export async function runGroupChatRounds(
     failedMembers,
     binding,
     isCurrent,
-    maxMessages
+    maxMessages,
+    toolCapable
   }
 
   let posted = 0
@@ -743,6 +744,16 @@ export async function runGroupChatRounds(
 
         return r
       })
+
+      // A decide-mode room always ends with a record of where it got to —
+      // on a ceiling only; a room that settled on its own needs no summary.
+      if (autoSummary && exitKind === 'capped') {
+        try {
+          summarizeGroupChat(group, members, thread)
+        } catch {
+          /* the summary must never break the drive's cleanup */
+        }
+      }
 
       // #89545: the loop's harvest pass only ran at the top of each round of
       // an ACTIVE loop — a member whose turn timed out after the final round

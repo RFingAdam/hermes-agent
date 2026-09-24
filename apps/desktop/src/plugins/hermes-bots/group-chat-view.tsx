@@ -100,6 +100,7 @@ import {
   updateGroupComposerDraft
 } from './group-panes'
 import type { GroupComposerDraft, GroupDraftSetter } from './group-panes'
+import { GroupRoomModeMenu } from './group-room-controls'
 import { groupReplyMentionTag, sendToGroupChat, stopGroupThread } from './group-rounds'
 import { clearGroupClarify, renameGroupClarify } from './group-turns'
 import { botsText, useBots } from './i18n'
@@ -788,6 +789,7 @@ export function GroupChatWorkspace({ group, members, onBack, visible = true }: G
             : b.group.memberCount(members.length)}
         </span>
       </Tip>
+      <GroupRoomModeMenu group={group} members={members} />
       <Tip label={b.group.settingsHint(group)}>
         <Button
           aria-label={b.group.settingsLabel(group)}
@@ -1103,45 +1105,52 @@ export function GroupChatWorkspace({ group, members, onBack, visible = true }: G
   // One log entry, rendered exactly as before conversation folding existed.
   const renderEntry = (entry: GroupMessage, index: number) => {
     const isUser = entry.from.kind === 'user'
+    // A note the room engine posted itself: no avatar, no reply, no handle.
+    const isSystem = entry.from.kind === 'system'
     const meta = groupTranscriptSpeakerMeta(entry, members, allMeta)
 
     // Match this speaker back to its member descriptor so display
     // names and disambiguating handles come from the roster (the
     // primary "default" profile renders as Hermes, remote dupes
     // carry their @name-device handle) instead of raw profile ids.
-    const member = isUser
-      ? null
-      : members.find(
-          b =>
-            b.name === entry.from.name &&
-            (entry.from.source ? (b.connectionLabel || b.connectionId) === entry.from.source : !b.remoteSource)
-        ) || null
+    const member =
+      isUser || isSystem
+        ? null
+        : members.find(
+            b =>
+              b.name === entry.from.name &&
+              (entry.from.source ? (b.connectionLabel || b.connectionId) === entry.from.source : !b.remoteSource)
+          ) || null
 
     const display = isUser
       ? b.group.you
-      : displayName(
-          member || {
-            name: entry.from.name
-          },
-          meta
-        )
+      : isSystem
+        ? entry.from.name || b.group.systemNote
+        : displayName(
+            member || {
+              name: entry.from.name
+            },
+            meta
+          )
 
     const entryKey = `${entry.at}:${index}`
-    const revealed = !isUser && revealedSpeaker === entryKey
+    const revealed = !isUser && !isSystem && revealedSpeaker === entryKey
 
     // Clicked: append the gateway name so same-named agents on
     // two connections are tellable apart on demand.
     const label = isUser
       ? b.group.you
-      : revealed
-        ? `${display}${entry.from.source ? `-${entry.from.source}` : ''} (@${botHandle(entry.from.name, member || undefined)})`
-        : display
+      : isSystem
+        ? display
+        : revealed
+          ? `${display}${entry.from.source ? `-${entry.from.source}` : ''} (@${botHandle(entry.from.name, member || undefined)})`
+          : display
 
     // Speaker avatar: same appearance pipeline as the roster
     // (custom image/pet, else deterministic shape+color face).
     // Source-qualified speakers use owner-aware botRosterMeta (#96432).
     // Non-null exactly when !isUser — the user's own lines carry no avatar.
-    const appearance = isUser ? null : botAppearance(entry.from.name, meta)
+    const appearance = isUser || isSystem ? null : botAppearance(entry.from.name, meta)
     const image = appearance?.image ?? null
     const photo = Boolean(image && !isBackfilledFacePng(image))
 
@@ -1149,7 +1158,11 @@ export function GroupChatWorkspace({ group, members, onBack, visible = true }: G
       <div
         className={cn(
           'group flex items-start gap-2',
-          isUser ? 'rounded-md bg-(--chrome-action-hover) px-2 py-1.5' : 'px-2 py-1'
+          isUser
+            ? 'rounded-md bg-(--chrome-action-hover) px-2 py-1.5'
+            : isSystem
+              ? 'rounded-md border border-dashed border-(--ui-stroke-secondary) px-2 py-1.5'
+              : 'px-2 py-1'
         )}
         key={entryKey}
       >
@@ -1166,8 +1179,15 @@ export function GroupChatWorkspace({ group, members, onBack, visible = true }: G
         ) : null}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            {isUser ? (
-              <span className="text-[0.7rem] font-semibold text-foreground">{label}</span>
+            {isUser || isSystem ? (
+              <span
+                className={cn(
+                  'text-[0.7rem] font-semibold',
+                  isSystem ? 'text-(--ui-text-tertiary)' : 'text-foreground'
+                )}
+              >
+                {label}
+              </span>
             ) : (
               <Tip label={revealed ? 'Hide full handle' : 'Show full handle'}>
                 <Button
@@ -1183,7 +1203,7 @@ export function GroupChatWorkspace({ group, members, onBack, visible = true }: G
             <span className="text-[0.625rem] text-(--ui-text-quaternary)">{relativeTime(entry.at)}</span>
             {entry.text.trim() || !isUser ? (
               <div className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
-                {isUser ? null : (
+                {isUser || isSystem ? null : (
                   <Tip label={`Reply to @${replyMentionTag(entry, member)}`}>
                     <Button
                       aria-label={`Reply to ${display}`}
