@@ -37,6 +37,11 @@ import { getPluginCtx } from './shared'
 type BotsMessages = {
   /** Left rail: the bot + group-chat roster. */
   roster: {
+    /** The install-wide "Extended rounds" group-chat opt-in (group-room-policy.ts). */
+    extendedRoundsOnHint: (rounds: number, minutes: number, stockRounds: number) => string
+    extendedRoundsOffHint: (rounds: number, minutes: number, stockRounds: number) => string
+    enableExtendedRounds: string
+    disableExtendedRounds: string
     search: string
     searchPlaceholder: string
     newBotOrGroup: string
@@ -312,6 +317,12 @@ type BotsMessages = {
 
 const en: BotsMessages = {
   roster: {
+    extendedRoundsOnHint: (rounds, minutes, stockRounds) =>
+      `Extended group-chat rounds on (up to ${rounds} rounds / ${minutes} min) — click for stock (${stockRounds} rounds)`,
+    extendedRoundsOffHint: (rounds, minutes, stockRounds) =>
+      `Stock group-chat rounds (${stockRounds} max) — click to enable extended (up to ${rounds} rounds / ${minutes} min)`,
+    enableExtendedRounds: 'Enable extended group-chat rounds',
+    disableExtendedRounds: 'Disable extended group-chat rounds',
     search: 'Search bots and group chats',
     searchPlaceholder: 'Search bots and group chats…',
     newBotOrGroup: 'New bot or group chat',
@@ -572,6 +583,12 @@ const en: BotsMessages = {
 
 const ja: BotsMessages = {
   roster: {
+    extendedRoundsOnHint: (rounds, minutes, stockRounds) =>
+      `グループチャットの延長ラウンド: オン（最大 ${rounds} ラウンド / ${minutes} 分）— クリックで標準（${stockRounds} ラウンド）に戻す`,
+    extendedRoundsOffHint: (rounds, minutes, stockRounds) =>
+      `グループチャットは標準ラウンド（最大 ${stockRounds}）— クリックで延長（最大 ${rounds} ラウンド / ${minutes} 分）`,
+    enableExtendedRounds: 'グループチャットの延長ラウンドを有効にする',
+    disableExtendedRounds: 'グループチャットの延長ラウンドを無効にする',
     search: 'ボットとグループチャットを検索',
     searchPlaceholder: 'ボットとグループチャットを検索…',
     newBotOrGroup: '新しいボットまたはグループチャット',
@@ -831,6 +848,12 @@ const ja: BotsMessages = {
 
 const zh: BotsMessages = {
   roster: {
+    extendedRoundsOnHint: (rounds, minutes, stockRounds) =>
+      `群聊延长轮次已开启（最多 ${rounds} 轮 / ${minutes} 分钟）— 点击恢复默认（${stockRounds} 轮）`,
+    extendedRoundsOffHint: (rounds, minutes, stockRounds) =>
+      `群聊默认轮次（最多 ${stockRounds} 轮）— 点击开启延长（最多 ${rounds} 轮 / ${minutes} 分钟）`,
+    enableExtendedRounds: '开启群聊延长轮次',
+    disableExtendedRounds: '关闭群聊延长轮次',
     search: '搜索机器人和群聊',
     searchPlaceholder: '搜索机器人和群聊…',
     newBotOrGroup: '新建机器人或群聊',
@@ -1083,6 +1106,12 @@ const zh: BotsMessages = {
 
 const zhHant: BotsMessages = {
   roster: {
+    extendedRoundsOnHint: (rounds, minutes, stockRounds) =>
+      `群組聊天延長輪次已開啟（最多 ${rounds} 輪 / ${minutes} 分鐘）— 點擊恢復預設（${stockRounds} 輪）`,
+    extendedRoundsOffHint: (rounds, minutes, stockRounds) =>
+      `群組聊天預設輪次（最多 ${stockRounds} 輪）— 點擊開啟延長（最多 ${rounds} 輪 / ${minutes} 分鐘）`,
+    enableExtendedRounds: '開啟群組聊天延長輪次',
+    disableExtendedRounds: '關閉群組聊天延長輪次',
     search: '搜尋機器人和群組聊天',
     searchPlaceholder: '搜尋機器人和群組聊天…',
     newBotOrGroup: '新增機器人或群組聊天',

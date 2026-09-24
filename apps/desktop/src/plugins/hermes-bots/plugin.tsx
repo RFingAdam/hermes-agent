@@ -65,6 +65,12 @@ import {
   updateGroupChat
 } from './group-chat'
 import { groupWorkspaceOwnerKey } from './group-membership'
+import {
+  $groupChatExtendedMode,
+  applyGroupChatExtendedOverride,
+  GROUP_CHAT_EXTENDED_MODE_KEY,
+  GROUP_CHAT_EXTENDED_OVERRIDE_KEY
+} from './group-room-policy'
 import { annotateOrphanedGroupChatMembers } from './hygiene'
 import { BOTS_LOCALES } from './i18n'
 import { displayName } from './labels'
@@ -236,6 +242,25 @@ export default {
         .catch(() => undefined)
     } catch {
       /* no storage — default (silent) stays */
+    }
+
+    // Hydrate the group-chat "Extended rounds" opt-in and its optional
+    // override. Absent or malformed storage keeps stock behavior (OFF).
+    try {
+      // @ts-expect-error TODO(bot-mode-types): PluginStorage.get requires a fallback argument.
+      Promise.resolve(ctx.storage?.get?.(GROUP_CHAT_EXTENDED_MODE_KEY))
+        .then(value => {
+          if (typeof value === 'boolean') {
+            $groupChatExtendedMode.set(value)
+          }
+        })
+        .catch(() => undefined)
+      // @ts-expect-error TODO(bot-mode-types): PluginStorage.get requires a fallback argument.
+      Promise.resolve(ctx.storage?.get?.(GROUP_CHAT_EXTENDED_OVERRIDE_KEY))
+        .then(value => applyGroupChatExtendedOverride(value))
+        .catch(() => undefined)
+    } catch {
+      /* no storage — stock ceilings stay */
     }
 
     // Hydrate persisted group-chat room logs (epoch/running are runtime-only

@@ -24,6 +24,8 @@ export interface GroupRoundMemberContext {
   binding: { isLive(): boolean }
   isCurrent(): boolean
   failedMembers?: Set<string>
+  /** This drive's message ceiling; GROUP_CHAT_MAX_MESSAGES when absent. */
+  maxMessages?: number
 }
 
 /** #93129: a held member's skip must consume its delta exactly once —
@@ -315,12 +317,13 @@ export async function runGroupContinuationMembers(
   posted: number
 ): Promise<number | null> {
   const { members, isCurrent } = context
+  const maxMessages = context.maxMessages ?? GROUP_CHAT_MAX_MESSAGES
   let spokeThisRound = 0
 
   if (pendingKeys.length && continuations <= GROUP_CHAT_MAX_CONTINUATIONS) {
     const citedMembers = members.filter((member: GroupMember) => pendingKeys.includes(groupMemberKey(member)))
 
-    if (citedMembers.length && posted < GROUP_CHAT_MAX_MESSAGES) {
+    if (citedMembers.length && posted < maxMessages) {
       const strandedNow = ($groupChats.get()[context.group] || {}).stranded || {}
 
       const continuationResponders = citedMembers.filter(
@@ -328,7 +331,7 @@ export async function runGroupContinuationMembers(
       )
 
       for (const member of continuationResponders) {
-        if (!isCurrent() || posted >= GROUP_CHAT_MAX_MESSAGES || continuations > GROUP_CHAT_MAX_CONTINUATIONS) {
+        if (!isCurrent() || posted >= maxMessages || continuations > GROUP_CHAT_MAX_CONTINUATIONS) {
           break
         }
 

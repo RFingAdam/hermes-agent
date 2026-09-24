@@ -12,6 +12,12 @@ import {
 } from '@hermes/plugin-sdk'
 
 import { botSourceStatus } from './data'
+import { GROUP_CHAT_MAX_ROUNDS } from './group-chat'
+import {
+  GROUP_CHAT_EXTENDED_MAX_ROUNDS,
+  GROUP_CHAT_EXTENDED_WALL_CLOCK_MS,
+  setGroupChatExtendedMode
+} from './group-room-policy'
 import type { useBots } from './i18n'
 import { setActivityToasts } from './roster-actions'
 import { GatewayKindGlyph } from './roster-sections'
@@ -21,6 +27,8 @@ import type { RosterActivityFilter, RosterKindFilter, RosterRow } from './types'
 interface renderRosterToolbarProps {
   b: ReturnType<typeof useBots>
   activityToasts: boolean
+  /** The install-wide "Extended rounds" group-chat opt-in. */
+  groupChatExtendedMode: boolean
   activeSourceRoster: RosterRow[]
   /** Full multi-source roster — the New Group Chat gate counts the same
    *  selectable set the dialog seats (bots from every registered connection). */
@@ -48,6 +56,7 @@ interface renderRosterToolbarProps {
 export function renderRosterToolbar({
   b,
   activityToasts,
+  groupChatExtendedMode,
   activeSourceRoster,
   roster,
   setCreateOpen,
@@ -84,6 +93,29 @@ export function renderRosterToolbar({
               variant="ghost"
             >
               <Codicon name={activityToasts ? 'bell' : 'bell-slash'} />
+            </Button>
+          </Tip>
+          {/* Opt-in "Extended rounds" for group chats. Off is exact stock
+              behavior; on raises the ceilings and adds a wall-clock cap. */}
+          <Tip
+            label={(groupChatExtendedMode ? b.roster.extendedRoundsOnHint : b.roster.extendedRoundsOffHint)(
+              GROUP_CHAT_EXTENDED_MAX_ROUNDS,
+              Math.round(GROUP_CHAT_EXTENDED_WALL_CLOCK_MS / 60000),
+              GROUP_CHAT_MAX_ROUNDS
+            )}
+          >
+            <Button
+              aria-label={groupChatExtendedMode ? b.roster.disableExtendedRounds : b.roster.enableExtendedRounds}
+              aria-pressed={groupChatExtendedMode}
+              className={cn(
+                'rounded-md hover:text-foreground',
+                groupChatExtendedMode ? 'text-(--ui-accent)' : 'text-(--ui-text-tertiary)'
+              )}
+              onClick={() => setGroupChatExtendedMode(!groupChatExtendedMode)}
+              size="icon-xs"
+              variant="ghost"
+            >
+              <Codicon name="watch" />
             </Button>
           </Tip>
           <DropdownMenu>

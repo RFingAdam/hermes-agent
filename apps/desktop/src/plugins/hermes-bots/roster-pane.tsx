@@ -37,6 +37,7 @@ import { GroupChatWorkspace, openGroupChat } from './group-chat-view'
 import { groupChatMemberBots } from './group-membership'
 import { $groupMainTabsRev, shouldRenderGroupChatInPane } from './group-panes'
 import { $activeGroupMemberKeys } from './group-presence'
+import { $groupChatExtendedMode } from './group-room-policy'
 import { $showHiddenBots, isBotHidden } from './hidden-bots'
 import { useBots } from './i18n'
 import { $activityToasts } from './roster-actions'
@@ -261,6 +262,7 @@ export function BotsPane() {
   const [collapsedRosterSections, setCollapsedRosterSections] = useState<Set<string>>(() => new Set())
   const hiddenSectionRef = useRef<null | HTMLDivElement>(null)
   const activityToasts = useValue($activityToasts)
+  const groupChatExtendedMode = useValue($groupChatExtendedMode)
   const groupChatName = useValue($groupChatWorkspace)
   // Main-tab ownership is a module Map; this rev subscription makes the
   // shouldRenderGroupChatInPane gate below reactive to tab open/close
@@ -473,6 +475,7 @@ export function BotsPane() {
       {renderRosterToolbar({
         b,
         activityToasts,
+        groupChatExtendedMode,
         activeSourceRoster,
         roster,
         setCreateOpen,
