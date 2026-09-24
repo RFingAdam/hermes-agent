@@ -202,6 +202,19 @@ export interface GroupHold {
   noted?: boolean
 }
 
+/** The route that actually served a member's most recent room turn, from
+ *  `session.resume.usage` (`get_session_usage_summary` on the gateway). The
+ *  configured model is not always the answering one: after a provider
+ *  fallback a member keeps replying as if nothing changed. */
+export interface GroupServedRoute {
+  /** The session has been served by more than one route. */
+  changedRoute: boolean
+  model: string
+  provider: string
+  /** Session-lifetime input + output + reasoning tokens. */
+  totalTokens: number
+}
+
 export interface GroupChat {
   /** Per-thread lanes (group-work.ts): thread id → the member key that owns
    *  it. Only the assignee is dispatched into an assigned thread. */
@@ -231,6 +244,8 @@ export interface GroupChat {
   /** Immutable identity, so a rename doesn't fork the room. */
   roomId?: null | string
   running?: boolean
+  /** Runtime-only: the serving route per member key, refreshed every turn. */
+  servedBy?: Record<string, GroupServedRoute>
   /** The immutable owner descriptor captured beside each plumbing session,
    *  keyed the same way as `sessions`. Partial: legacy records hold a bare
    *  `{ name }`, and the sweep re-validates the route before trusting one. */

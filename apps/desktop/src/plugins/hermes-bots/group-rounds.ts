@@ -600,7 +600,7 @@ export async function runGroupChatRounds(
   // room's round, message and wall-clock ceilings never cut it off mid-task.
   const claimsOpen = () => workLoop && hasOpenGroupWorkClaims(group, thread)
   const tokenBudget = groupTokenBudget(group)
-  const spend = createGroupSpendMeter()
+  const spend = createGroupSpendMeter(() => group)
 
   const context = {
     get group() {
@@ -616,7 +616,7 @@ export async function runGroupChatRounds(
     toolCapable,
     workLoop,
     claimKeys: new Set<string>(),
-    noteSpend: (_member: GroupMember, prompt: string, reply: null | string) => spend.noteTurn(prompt, reply)
+    spend
   }
 
   let posted = 0
@@ -660,7 +660,7 @@ export async function runGroupChatRounds(
         appendGroupChatEntry(
           group,
           { kind: 'system', name: 'Budget' },
-          `Room stopped at roughly ${spent.toLocaleString()} estimated tokens (ceiling ${tokenBudget.toLocaleString()}). This is a character-based estimate, not a billed figure. Open work claims were released; send a message to continue.`,
+          `Room stopped at ${spent.toLocaleString()} tokens (ceiling ${tokenBudget.toLocaleString()}, ${groupSpendSource(spend.reported(), spent)}). Open work claims were released; send a message to continue.`,
           thread
         )
 
@@ -840,6 +840,17 @@ export async function runGroupChatRounds(
 
     binding.dispose()
   }
+}
+
+/** Which figure a spend-ceiling note is quoting, said plainly. */
+function groupSpendSource(reported: number, spent: number) {
+  if (reported <= 0) {
+    return 'character estimate - the backend reported no usage'
+  }
+
+  return reported < spent
+    ? 'reported by the backend, plus a character estimate for turns it had not reported yet'
+    : 'reported by the backend'
 }
 
 /** Bounded background harvest for members whose replies outlived the turn

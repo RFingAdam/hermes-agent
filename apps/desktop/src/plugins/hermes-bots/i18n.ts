@@ -185,6 +185,9 @@ type BotsMessages = {
   }
   /** Group chats: the room, its composer, threads and activity feed. */
   group: {
+    /** The serving-route tag beside a member's turn (session.resume `usage`). */
+    servedByHint: (model: string, provider: string) => string
+    servedByChangedHint: (model: string) => string
     /** The room-header menu's work-loop switch (group-work.ts). */
     workLoopOn: string
     workLoopOff: string
@@ -472,6 +475,10 @@ const en: BotsMessages = {
     generating: 'Generating…'
   },
   group: {
+    servedByHint: (model, provider) =>
+      `Served by ${model}${provider ? ` (${provider})` : ''} — the most recent route for this member`,
+    servedByChangedHint: model =>
+      `${model} — this session has served turns on more than one model; the configured model is not the only one answering`,
     workLoopOn: 'Work loop on — bots finish tasks',
     workLoopOff: 'Work loop off — one reply per turn',
     roomModeDefault: 'Default',
@@ -753,6 +760,10 @@ const ja: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    servedByHint: (model, provider) =>
+      `応答モデル: ${model}${provider ? `（${provider}）` : ''} — このメンバーの直近のルート`,
+    servedByChangedHint: model =>
+      `${model} — このセッションは複数のモデルで応答しています。設定されたモデルだけが応答しているわけではありません`,
     workLoopOn: '作業ループ オン — ボットがタスクを最後まで進める',
     workLoopOff: '作業ループ オフ — 1 ターンに 1 返信',
     roomModeDefault: 'デフォルト',
@@ -1029,6 +1040,8 @@ const zh: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    servedByHint: (model, provider) => `由 ${model}${provider ? `（${provider}）` : ''} 响应 — 该成员最近使用的路由`,
+    servedByChangedHint: model => `${model} — 此会话已由多个模型响应；并非只有配置的模型在回答`,
     workLoopOn: '工作循环已开启 — 机器人会完成任务',
     workLoopOff: '工作循环已关闭 — 每轮只回复一次',
     roomModeDefault: '默认',
@@ -1302,6 +1315,8 @@ const zhHant: BotsMessages = {
     generating: '生成中…'
   },
   group: {
+    servedByHint: (model, provider) => `由 ${model}${provider ? `（${provider}）` : ''} 回應 — 此成員最近使用的路由`,
+    servedByChangedHint: model => `${model} — 此工作階段已由多個模型回應；並非只有設定的模型在回答`,
     workLoopOn: '工作循環已開啟 — 機器人會完成任務',
     workLoopOff: '工作循環已關閉 — 每輪只回覆一次',
     roomModeDefault: '預設',

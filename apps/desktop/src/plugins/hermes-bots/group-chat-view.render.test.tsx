@@ -103,3 +103,29 @@ it('renders a room note as a plain label with no speaker controls, and shows the
   // The header's preset menu names the room's mode.
   expect(getByText(translateBots('group.roomModeDecide')).closest('button')).not.toBeNull()
 })
+
+it('tags a member turn with the model that served it, amber when the session changed route', async () => {
+  Element.prototype.scrollIntoView = vi.fn()
+  const { $groupChats } = await import('./group-chat')
+  const { GroupChatWorkspace } = await import('./group-chat-view')
+
+  const log = [
+    { id: 'm1', thread: 'a', from: { kind: 'member' as const, name: 'builder' }, text: 'done', at: 1 },
+    { id: 'm2', thread: 'a', from: { kind: 'member' as const, name: 'ops' }, text: 'ok', at: 2 }
+  ]
+
+  const servedBy = {
+    builder: { model: 'gemini-3-pro', provider: 'openrouter', changedRoute: true, totalTokens: 10 },
+    ops: { model: 'claude-sonnet-5', provider: 'anthropic', changedRoute: false, totalTokens: 10 }
+  }
+
+  $groupChats.set({ Room: { log, servedBy, watermarks: {}, sessions: {} } })
+  const { getAllByTestId } = render(
+    <GroupChatWorkspace group="Room" members={[{ name: 'builder' }, { name: 'ops' }] as never} />
+  )
+
+  expect(getAllByTestId('group-served-by').map(el => [el.textContent, el.dataset.changedRoute])).toEqual([
+    ['gemini-3-pro', 'true'],
+    ['claude-sonnet-5', undefined]
+  ])
+})

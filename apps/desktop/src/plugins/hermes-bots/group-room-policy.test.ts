@@ -340,8 +340,10 @@ describe('spend ceiling', () => {
 
     expect(notes).toHaveLength(1)
     expect(notes[0].thread).toBe(thread)
-    expect(notes[0].text).toMatch(/Room stopped at roughly [\d,.\s]+ estimated tokens \(ceiling 2[,.\s]?000\)/)
-    expect(notes[0].text).toContain('character-based estimate')
+    expect(notes[0].text).toMatch(/Room stopped at [\d,.\s]+ tokens \(ceiling 2[,.\s]?000, /)
+    // No usage from this gateway: the note must say it is an estimate
+    // rather than imply a billed figure.
+    expect(notes[0].text).toContain('character estimate - the backend reported no usage')
     // ~1000 tokens a reply: the claim holder is stopped after two turns,
     // long before the work loop's backstop.
     expect(room.gateway.calls.filter(call => call.profile === 'builder')).toHaveLength(2)
@@ -369,15 +371,66 @@ describe('spend ceiling', () => {
 
   it('estimates roughly four characters a token, counting the prompt and the reply', async () => {
     const { policy } = await loadRoom()
-    const meter = policy.createGroupSpendMeter()
+    const meter = policy.createGroupSpendMeter(() => 'Room')
 
     expect(policy.estimateGroupTokens('abcd')).toBe(1)
     expect(policy.estimateGroupTokens('abcde')).toBe(2)
     expect(policy.estimateGroupTokens(null)).toBe(0)
 
-    meter.noteTurn('x'.repeat(400), 'y'.repeat(40))
-    meter.noteTurn('x'.repeat(400), null)
+    meter.noteTurn('builder', 'x'.repeat(400), 'y'.repeat(40))
+    meter.noteTurn('ops', 'x'.repeat(400), null)
 
     expect(meter.spent()).toBe(100 + 10 + 100)
+  })
+})
+
+describe('served route', () => {
+  const assistantTurns = (session: { messages: Array<{ role: string }> }) =>
+    session.messages.filter(message => message.role === 'assistant').length
+
+  it('records the route that actually served each member, flagging a changed route', async () => {
+    const room = await loadRoom({
+      turn: ({ profile }) => (profile === 'builder' ? 'on it' : '(pass)'),
+      usage: {
+        builder: () => ({
+          model: 'gemini-3-pro',
+          provider: 'openrouter',
+          changed_route: true,
+          models: [{ model: 'claude-sonnet-5' }, { model: 'gemini-3-pro' }],
+          total_tokens: 1234
+        })
+      }
+    })
+
+    room.rounds.sendToGroupChat('Routes', MEMBERS, '@builder go')
+    await settle(room, 'Routes')
+
+    expect(room.chat.$groupChats.get().Routes?.servedBy).toEqual({
+      builder: { model: 'gemini-3-pro', provider: 'openrouter', changedRoute: true, totalTokens: 1234 }
+    })
+    // Runtime-only: refreshed every turn, never written to the durable record.
+    expect('servedBy' in room.chat.durableGroupChatRooms().Routes).toBe(false)
+  })
+
+  it('prefers reported totals over the estimate, measured from where this drive started', async () => {
+    // The session already carries 100k lifetime tokens and every turn adds
+    // 5k. Charging the drive for the lifetime total would stop it after the
+    // first turn; the drive's own share crosses 8k on the third.
+    const room = await loadRoom({
+      turn: ({ n, profile }) => (profile === 'builder' ? `step ${n}\n(working)` : '(pass)'),
+      usage: {
+        builder: session => ({ model: 'claude-sonnet-5', total_tokens: 100_000 + 5000 * assistantTurns(session) })
+      }
+    })
+
+    room.chat.updateGroupChat('Metered', current => ({ ...current, tokenBudget: 8000 }))
+    room.rounds.sendToGroupChat('Metered', MEMBERS, '@builder go')
+    await settle(room, 'Metered')
+
+    const note = (room.chat.$groupChats.get().Metered?.log || []).find(entry => entry.from.kind === 'system')
+
+    expect(room.gateway.calls.filter(call => call.profile === 'builder')).toHaveLength(3)
+    expect(note?.text).toContain('reported by the backend')
+    expect(note?.text).not.toContain('the backend reported no usage')
   })
 })

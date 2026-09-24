@@ -268,21 +268,69 @@ export function groupTokenBudget(group: string): number {
   return (mode && GROUP_TOKEN_BUDGETS[mode]) || GROUP_TOKEN_BUDGET_DEFAULT
 }
 
-/** What one drive has spent so far. */
+/** What one drive has spent so far. Real per-session totals when the
+ *  gateway reports them (`servedBy`, fed by `session.resume.usage`), the
+ *  character estimate otherwise. Sessions outlive a drive, so real spend is
+ *  the delta from each member's total at its first metered turn of THIS
+ *  drive. `servedBy` is runtime-only, so a member's first turn after a
+ *  window load has no known pre-turn total: that turn is counted by its
+ *  estimate and its reported total becomes the baseline, rather than
+ *  charging the drive for the session's whole lifetime. */
 export interface GroupSpendMeter {
+  /** Call before a member's turn: pins its baseline on first use. */
+  beginTurn(memberKey: string): void
   /** Count one member turn: the prompt it was sent and what came back. */
-  noteTurn(prompt: string, reply: null | string): void
+  noteTurn(memberKey: string, prompt: string, reply: null | string): void
+  /** Tokens the backend reported for this drive; 0 when it reported none. */
+  reported(): number
   spent(): number
 }
 
-export function createGroupSpendMeter(): GroupSpendMeter {
-  let estimated = 0
+export function createGroupSpendMeter(group: () => string): GroupSpendMeter {
+  // memberKey → the reported total this drive's metering starts from; null
+  // while that member has not reported one yet.
+  const baseline = new Map<string, null | number>()
+  // Turns no reported total covers, by their character estimate.
+  let unmetered = 0
+
+  const servedTotal = (memberKey: string): null | number => {
+    const served = $groupChats.get()[group()]?.servedBy?.[memberKey]
+
+    return served ? Math.max(0, Number(served.totalTokens) || 0) : null
+  }
+
+  const reported = () => {
+    let total = 0
+
+    for (const [memberKey, base] of baseline) {
+      const now = servedTotal(memberKey)
+
+      if (base !== null && now !== null) {
+        total += Math.max(0, now - base)
+      }
+    }
+
+    return total
+  }
 
   return {
-    noteTurn(prompt, reply) {
-      estimated += estimateGroupTokens(prompt) + estimateGroupTokens(reply)
+    beginTurn(memberKey) {
+      if (!baseline.has(memberKey)) {
+        baseline.set(memberKey, servedTotal(memberKey))
+      }
     },
-    spent: () => estimated
+    noteTurn(memberKey, prompt, reply) {
+      const base = baseline.get(memberKey)
+
+      if (base !== undefined && base !== null) {
+        return // the member's reported total already counts this turn
+      }
+
+      unmetered += estimateGroupTokens(prompt) + estimateGroupTokens(reply)
+      baseline.set(memberKey, servedTotal(memberKey))
+    },
+    reported,
+    spent: () => reported() + unmetered
   }
 }
 

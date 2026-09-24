@@ -1153,6 +1153,9 @@ export function GroupChatWorkspace({ group, members, onBack, visible = true }: G
     const appearance = isUser || isSystem ? null : botAppearance(entry.from.name, meta)
     const image = appearance?.image ?? null
     const photo = Boolean(image && !isBackfilledFacePng(image))
+    // Which model actually served this member: after a provider fallback the
+    // configured model is no longer the one answering.
+    const served = isUser || isSystem ? null : room.servedBy?.[groupMemberKey(member || { name: entry.from.name })]
 
     return (
       <div
@@ -1201,6 +1204,25 @@ export function GroupChatWorkspace({ group, members, onBack, visible = true }: G
               </Tip>
             )}
             <span className="text-[0.625rem] text-(--ui-text-quaternary)">{relativeTime(entry.at)}</span>
+            {served?.model ? (
+              <span
+                className={cn(
+                  'shrink-0 rounded px-1 text-[0.6rem]',
+                  served.changedRoute
+                    ? 'bg-amber-500/15 text-amber-600 dark:text-amber-300'
+                    : 'text-(--ui-text-quaternary)'
+                )}
+                data-changed-route={served.changedRoute ? 'true' : undefined}
+                data-testid="group-served-by"
+                title={
+                  served.changedRoute
+                    ? b.group.servedByChangedHint(served.model)
+                    : b.group.servedByHint(served.model, served.provider)
+                }
+              >
+                {served.model}
+              </span>
+            ) : null}
             {entry.text.trim() || !isUser ? (
               <div className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
                 {isUser || isSystem ? null : (

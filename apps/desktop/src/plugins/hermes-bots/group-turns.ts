@@ -163,6 +163,39 @@ interface GroupSessionSnapshot {
   running?: boolean
   session_id?: string
   session_key?: string
+  /** What actually served the session (`SessionUsageMixin.get_session_usage_summary`);
+   *  absent on gateways that predate it or before the first model call. */
+  usage?: GroupSessionUsage
+}
+
+/** The `usage` summary the gateway carries on a live-session payload. */
+interface GroupSessionUsage {
+  changed_route?: boolean
+  model?: string
+  provider?: string
+  total_tokens?: number
+}
+
+/** Record which route served this member's turn, so a provider fallback is
+ *  visible in the room instead of the member quietly answering as a
+ *  different model. Runtime-only: the next turn refreshes it. */
+export function noteGroupServedBy(group: string, member: GroupMember, usage: GroupSessionUsage | null | undefined) {
+  if (!usage?.model) {
+    return
+  }
+
+  const served = {
+    model: String(usage.model),
+    provider: String(usage.provider || ''),
+    changedRoute: Boolean(usage.changed_route),
+    totalTokens: Math.max(0, Number(usage.total_tokens) || 0)
+  }
+
+  updateGroupChat(
+    group,
+    (room: GroupChatRoom) => ({ ...room, servedBy: { ...(room.servedBy || {}), [groupMemberKey(member)]: served } }),
+    { sync: false }
+  )
 }
 
 /** Group turns are explicit user work. A member may be cold or retired when
@@ -1054,6 +1087,7 @@ async function pollGroupMemberTurn(context: GroupTurnPollContext): Promise<null 
           member: groupMemberKey(member),
           thread
         })
+        noteGroupServedBy(context.group, member, state?.usage)
 
         return replyText
       }

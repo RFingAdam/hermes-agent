@@ -12,6 +12,7 @@ import {
 } from './group-chat'
 import type { GroupChatRoom } from './group-chat'
 import { groupMemberAuthor, groupMemberKey } from './group-membership'
+import type { GroupSpendMeter } from './group-room-policy'
 import { buildGroupChatTurnPrompt, formatGroupDeltaLines } from './group-round-prompt'
 import { isGroupPassText, runGroupChatMemberTurn } from './group-turns'
 import { applyGroupWorkTurn } from './group-work'
@@ -33,8 +34,8 @@ export interface GroupRoundMemberContext {
   workLoop?: boolean
   /** Members holding an open work claim on this thread THIS round. */
   claimKeys?: ReadonlySet<string>
-  /** Count one dispatched turn against the drive's token ceiling. */
-  noteSpend?(member: GroupMember, prompt: string, reply: null | string): void
+  /** The drive's spend meter; every dispatched turn counts against it. */
+  spend?: GroupSpendMeter
 }
 
 /** The delta line a claim holder gets when nothing new was said: it is
@@ -197,6 +198,8 @@ export async function runGroupRoundMember(
   let reply: null | string = null
   let accepted = false
 
+  context.spend?.beginTurn(memberKey)
+
   try {
     reply = await runVisibleMemberTurn(context, member, prompt, deltaImages)
     accepted = true
@@ -230,7 +233,7 @@ export async function runGroupRoundMember(
   }
 
   // A dispatched prompt is spent whether or not its reply is ever committed.
-  context.noteSpend?.(member, prompt, reply)
+  context.spend?.noteTurn(memberKey, prompt, reply)
 
   // #93127: the turn may have finished AFTER a newer user send bumped
   // the room epoch. That newer send's loop re-drives this member with

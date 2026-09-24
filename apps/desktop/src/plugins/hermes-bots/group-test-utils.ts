@@ -109,6 +109,9 @@ export interface GatewayOptions {
    *  reply — the snapshot `_fail_inflight_turn` leaves for reconnecting clients. */
   retainedErrorAfterSubmit?: string
   turn?: TurnScript
+  /** Per profile: the `usage` summary `session.resume` reports (the route
+   *  that served the session), computed from the session each resume. */
+  usage?: Record<string, (session: ScriptedSession) => Record<string, unknown> | null>
 }
 
 /** A gateway-shaped rejection: `.code` is what the engine branches on. */
@@ -290,6 +293,7 @@ export function createGroupGateway(options: GatewayOptions = {}): ScriptedGatewa
         running: false,
         session_id: session.runtime,
         session_key: session.stored,
+        ...(options.usage?.[session.profile] ? { usage: options.usage[session.profile](session) } : {}),
         ...(clarify && seen <= clarify.until ? { open_requests: [clarify.payload] } : {}),
         ...(approval && seen <= approval.until ? { pending_approval: approval.payload } : {})
       }
