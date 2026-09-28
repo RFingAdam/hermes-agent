@@ -2872,10 +2872,10 @@ def _live_session_payload(
     # a session can run start to finish on a fallback provider with nothing on
     # screen saying so. Usage rows are the record of real calls.
     try:
-        from tui_gateway.session_workdir import _session_db
+        from tui_gateway.session_workdir import _session_db as _usage_session_db
 
         stored_key = _session_lookup_key(session, fallback=sid)
-        with _session_db(session) as usage_db:
+        with _usage_session_db(session) as usage_db:
             usage = None
             if usage_db is not None:
                 usage = usage_db.get_session_usage_summary(stored_key)
