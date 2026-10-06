@@ -19,8 +19,9 @@ Use after substantive answers. Appends 2-3 check-questions.
 | Version | `1.0.0` |
 | Author | Anthropic (upstream) / Hermes port |
 | License | Apache-2.0 |
+| Platforms | linux, macos, windows |
 | Tags | `behavior`, `output-style`, `critical-thinking`, `follow-ups`, `prose-only` |
-| Related skills | [`humanizer`](/docs/user-guide/skills/bundled/creative/creative-humanizer), [`grounded-citations`](/docs/user-guide/skills/bundled/research/research-grounded-citations) |
+| Related skills | [`humanizer`](../../bundled/creative/creative-humanizer.md), [`grounded-citations`](../../bundled/research/research-grounded-citations.md) |
 
 ## Reference: full SKILL.md
 
