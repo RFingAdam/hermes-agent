@@ -335,6 +335,7 @@ function stopWordPlacement(value: string): 'adjacent' | 'distant' | null {
     maskQuotedAndCodeSpans(value)
       .toLowerCase()
       .match(/@[\p{L}\p{N}._-]+|[\p{L}\p{N}_-]+/gu) || []
+
   const mentionAt: number[] = []
   const stopAt: number[] = []
 

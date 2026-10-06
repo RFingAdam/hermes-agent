@@ -1091,6 +1091,7 @@ export function GroupChatWorkspace({ group, members, onBack, visible = true }: G
 
     const seed = (current: string) =>
       current.includes(`@${tag}`) ? current : `@${tag} ${current}`.replace(/\s+$/, ' ')
+
     const thread = groupThreadOf(entry)
 
     if (replyThread === thread) {
